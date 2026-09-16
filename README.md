@@ -163,10 +163,10 @@ Measured against a live container, not estimated:
 
 | | |
 |---|---|
-| Idle | 43 MiB |
+| Idle | 43 MiB, 12 PIDs |
 | Peak, `MAX_CONCURRENCY=1` | 350 MiB |
-| Peak, `MAX_CONCURRENCY=3` | 859 MiB |
-| Per additional Chromium | ~254 MiB |
+| Peak, `MAX_CONCURRENCY=3` | 859 MiB, 358 PIDs |
+| Per additional Chromium | ~254 MiB, ~115 threads |
 
 Scrapling launches and tears down a browser per fetch, so memory is spiky, not cumulative;
 with `FULL_BODIES=true` a search call is a long run of them, so the peak is held for minutes
@@ -174,6 +174,10 @@ rather than touched once. `MAX_CONCURRENCY` keeps the app inside its budget; the
 in `docker-compose.yml` is a blast-radius guard for the host — reaching it means the kernel
 OOM-kills the container and drops in-flight scrapes. 2 GB fits the default `MAX_CONCURRENCY=3`
 with roughly 2.4× headroom, which leaves a 4 GB VPS room for `trustpilot-reviews` beside it.
+
+If you raise `MAX_CONCURRENCY`, watch both caps: memory runs out around 7–8 concurrent
+browsers, and `pids_limit` around 8. A PID ceiling that bites first shows up as opaque
+Chromium crashes rather than a clear error, which is why it is set to 1024 rather than 512.
 
 Do not lower `MAX_CONCURRENCY` to save memory. The same 6-post search with full bodies took
 **101 s at 3 and 239 s at 1**, against Stage 4's 290 s node timeout — concurrency is a latency

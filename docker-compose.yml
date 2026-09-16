@@ -41,8 +41,14 @@ services:
     # Chromium forks heavily and a fetch that times out can orphan its process tree.
     # init: true runs a real init as PID 1 so those get reaped instead of accumulating
     # as zombies; pids_limit stops a fork storm from taking the host down with it.
+    #
+    # Measured: 12 idle, 358 at MAX_CONCURRENCY=3 - about 115 threads per Chromium. 512
+    # would therefore break at concurrency 5 (~588) while memory was still under 1.4GB,
+    # so the PID ceiling would bite first and surface as opaque browser crashes rather
+    # than a clear limit error. 1024 puts it back behind mem_limit as the binding cap:
+    # memory runs out around concurrency 7-8, PIDs around 8.
     init: true
-    pids_limit: 512
+    pids_limit: 1024
 
     # Scrapling already passes --disable-dev-shm-usage, so Chromium puts shared memory in
     # /tmp on disk rather than /dev/shm. This is insurance for the paths that ignore that
