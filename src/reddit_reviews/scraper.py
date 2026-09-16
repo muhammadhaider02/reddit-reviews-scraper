@@ -1,0 +1,578 @@
+"""Fetch Reddit search and thread pages with a stealth browser and parse the server-rendered markup.
+
+Reddit's JSON endpoints (`/search.json`, `/comments/<id>.json`) answer 403 "blocked by network security"
+to plain HTTP clients AND to the stealth browser, so they are not an option. The regular web pages do
+load in the stealth browser, and they are server-rendered with the data in attributes:
+
+  search   /svc/shreddit/search/?q=...  (the page's own infinite-scroll fragment, ~7 posts, ~5 s)
+           <search-telemetry-tracker data-faceplate-tracking-context='{"post":{id,title},"subreddit":{name},...}'>
+           plus <faceplate-timeago ts>, <faceplate-number> votes/comments, and a cursor link to the next page.
+  thread   /r/<sub>/comments/<id>/
+           <shreddit-post id comment-count score created-timestamp subreddit-name ...>
+           <shreddit-comment thingid depth parentid score created author ...>
+           bodies in #<id>-post-rtjson-content and #<thingid>-comment-rtjson-content
+"""
+
+from __future__ import annotations
+
+import html as htmllib
+import json
+import logging
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable
+from urllib.parse import urlencode
+
+from scrapling.parser import Selector
+
+from .config import settings
+
+log = logging.getLogger(__name__)
+
+BASE = "https://www.reddit.com"
+SEARCH_PATH = "/svc/shreddit/search/"
+SORTS = {"relevance", "hot", "top", "new", "comments"}
+TIMES = {"all", "hour", "day", "week", "month", "year"}
+
+# Text Reddit serves instead of content when it refuses us. Kept lowercase.
+BLOCK_MARKERS = ("blocked by network security", "whoa there, pardner", "you've been blocked")
+
+THREAD_PATH_RE = re.compile(r"/r/([A-Za-z0-9_]+)/comments/([a-z0-9]+)", re.I)
+NEXT_CURSOR_RE = re.compile(r'src="(/svc/shreddit/search/\?[^"]*cursor=[^"]*)"')
+
+Fetcher = Callable[[str, "str | None"], "tuple[int, str]"]
+
+
+class RedditError(Exception):
+    """Base class. `status` is the HTTP status the API should answer with."""
+
+    status = 502
+
+
+class ScrapeBlocked(RedditError):
+    """Reddit refused us (IP block, rate limit, interstitial). OUR problem, a vendor failure in Stage 4
+    terms, so the message must NOT contain '404', 'not found', 'no such page' or 'invalid url'
+    (Stage 4's BRAND_ERROR_RE would burn one of the brand's retries)."""
+
+    status = 503
+
+
+class ScrapeFailed(RedditError):
+    """Browser or network failure. Also a vendor failure from Stage 4's point of view."""
+
+    status = 503
+
+
+class ThreadMissing(RedditError):
+    """A thread page that 404s or renders no post (deleted, private, quarantined). Skipped, never surfaced."""
+
+    status = 404
+
+
+@dataclass
+class Post:
+    id: str  # t3_xxxxx
+    title: str
+    body: str
+    subreddit: str
+    author: str
+    created_at: str
+    score: int
+    num_comments: int
+    permalink: str
+    nsfw: bool = False
+    # True when `body` is Reddit's search snippet rather than the full text from the thread page.
+    body_is_snippet: bool = False
+    search_term: str = ""
+
+
+@dataclass
+class Comment:
+    id: str  # t1_xxxxx
+    post_id: str
+    parent_id: str
+    body: str
+    subreddit: str
+    author: str
+    created_at: str
+    score: int
+    depth: int
+    permalink: str
+
+
+@dataclass
+class SearchPage:
+    posts: list[Post]
+    next_url: str | None
+
+
+@dataclass
+class Thread:
+    post: Post
+    comments: list[Comment]
+    url: str
+
+
+@dataclass
+class SearchResult:
+    posts: list[Post]
+    pages_fetched: int
+    seconds: float
+    failed_terms: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ThreadsResult:
+    threads: list[Thread]
+    pages_fetched: int
+    seconds: float
+    missing: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- small helpers
+
+
+def _int(v) -> int:
+    try:
+        return int(float(str(v).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _text(node) -> str:
+    return re.sub(r"\s+", " ", node.get_all_text(separator=" ", strip=True)).strip() if node is not None else ""
+
+
+def iso(ts: str | None) -> str:
+    """Reddit writes `2026-04-23T04:06:19.598000+0000`. JavaScript's Date.parse is unreliable on the
+    6-digit fraction and colon-less offset, and Stage 4 ages posts with Date.parse, so normalise to
+    `2026-04-23T04:06:19.598Z`."""
+    raw = (ts or "").strip()
+    if not raw:
+        return ""
+    fixed = re.sub(r"([+-]\d\d)(\d\d)$", r"\1:\2", raw.replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(fixed)
+    except ValueError:
+        return raw
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _ctx(node) -> dict:
+    try:
+        return json.loads(node.attrib.get("data-faceplate-tracking-context") or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def _title_of(html: str) -> str:
+    m = re.search(r"<title>(.*?)</title>", html, re.S)
+    return re.sub(r"\s+", " ", m.group(1)).strip()[:120] if m else ""
+
+
+def is_blocked_page(html: str) -> bool:
+    low = html[:400_000].lower()
+    return any(m in low for m in BLOCK_MARKERS)
+
+
+# --------------------------------------------------------------------------- URLs
+
+
+def build_search_url(term: str, sort: str = "relevance", time_filter: str = "all") -> str:
+    sort = sort.lower() if sort and sort.lower() in SORTS else "relevance"
+    time_filter = time_filter.lower() if time_filter and time_filter.lower() in TIMES else "all"
+    # Reddit silently "corrects" unfamiliar words, and brand names are exactly those (it rewrote a made-up brand
+    # into "brand that doesn't exist" and served unrelated posts). Stage 4 relies on literal matching.
+    params = {"q": term, "type": "posts", "sort": sort, "t": time_filter, "disableSpellCorrection": "true"}
+    return BASE + SEARCH_PATH + "?" + urlencode(params)
+
+
+def thread_url(raw: str) -> str:
+    """Normalise any thread link (www/old/new reddit, with or without a slug or comment id) to its canonical
+    www.reddit.com page. Raises ValueError for anything that is not a thread."""
+    m = THREAD_PATH_RE.search(str(raw or ""))
+    if not m:
+        raise ValueError(f"not a reddit thread link: {str(raw)[:120]!r}")
+    return f"{BASE}/r/{m.group(1)}/comments/{m.group(2).lower()}/"
+
+
+# --------------------------------------------------------------------------- parsing
+
+
+def _card_of(node, levels: int = 8):
+    """Nearest ancestor holding the whole search result (it is the one that carries the counter row)."""
+    cur = node
+    for _ in range(levels):
+        cur = cur.parent
+        if cur is None:
+            return None
+        if cur.css('[data-testid="search-counter-row"]'):
+            return cur
+    return None
+
+
+def _counts(card) -> tuple[int, int]:
+    votes = comments = 0
+    rows = card.css('[data-testid="search-counter-row"]') if card is not None else []
+    if not rows:
+        return votes, comments
+    numbers = rows[0].css("faceplate-number")
+    for i, n in enumerate(numbers):
+        label = _text(n.parent).lower()
+        value = _int(n.attrib.get("number"))
+        if "comment" in label:
+            comments = value
+        elif "vote" in label:
+            votes = value
+        elif i == 0:
+            votes = value
+        else:
+            comments = value
+    return votes, comments
+
+
+def parse_search(html: str, term: str = "") -> SearchPage:
+    doc = Selector(html)
+    posts: list[Post] = []
+    seen: set[str] = set()
+    for trk in doc.css("search-telemetry-tracker"):
+        ctx = _ctx(trk)
+        if (ctx.get("action_info") or {}).get("type") != "post":
+            continue
+        p = ctx.get("post") or {}
+        pid = str(p.get("id") or "")
+        if not pid.startswith("t3_") or pid in seen:
+            continue
+        seen.add(pid)
+        card = _card_of(trk)
+
+        link = None
+        for sel in ('a[data-testid="post-title-text"]', 'a[data-testid="post-title"]'):
+            found = card.css(sel) if card is not None else []
+            if found:
+                link = found[0]
+                break
+        if link is None:
+            found = trk.css("a")
+            link = found[0] if found else None
+        permalink = (link.attrib.get("href") if link is not None else "") or ""
+
+        # Reddit's snippet is sometimes a matching COMMENT (snippet_id t1_...). Only the post's own text may
+        # stand in for its body, or a stranger's reply would be quoted as the poster's words.
+        snippet = ""
+        candidates = [ctx] + ([_ctx(t) for t in card.css("search-telemetry-tracker")] if card is not None else [])
+        for c in candidates:
+            s = c.get("search") or {}
+            if s.get("snippet") and s.get("snippet_id") == pid:
+                snippet = str(s["snippet"])
+                break
+
+        ts = card.css("faceplate-timeago") if card is not None else []
+        votes, num_comments = _counts(card)
+        posts.append(
+            Post(
+                id=pid,
+                title=re.sub(r"\s+", " ", str(p.get("title") or "")).strip(),
+                body=re.sub(r"\s+", " ", snippet).strip(),
+                subreddit=str((ctx.get("subreddit") or {}).get("name") or ""),
+                author=str((ctx.get("profile") or {}).get("name") or ""),
+                created_at=iso(ts[0].attrib.get("ts") if ts else ""),
+                score=votes,
+                num_comments=num_comments,
+                permalink=permalink,
+                nsfw=bool(p.get("nsfw")),
+                body_is_snippet=True,
+                search_term=term,
+            )
+        )
+    m = NEXT_CURSOR_RE.search(html)
+    next_url = BASE + htmllib.unescape(m.group(1)) if m else None
+    return SearchPage(posts=posts, next_url=next_url)
+
+
+def parse_thread(html: str, url: str = "") -> Thread:
+    doc = Selector(html)
+    found = doc.css("shreddit-post")
+    if not found:
+        raise ThreadMissing(f"thread page rendered no post: {url}")
+    a = found[0].attrib
+    pid = str(a.get("id") or "")
+    sub = str(a.get("subreddit-name") or "").removeprefix("r/")
+    body = doc.css(f"#{pid}-post-rtjson-content") if pid else []
+    post = Post(
+        id=pid,
+        title=re.sub(r"\s+", " ", str(a.get("post-title") or "")).strip(),
+        body=_text(body[0]) if body else "",
+        subreddit=sub,
+        author=str(a.get("author") or ""),
+        created_at=iso(a.get("created-timestamp")),
+        score=_int(a.get("score")),
+        num_comments=_int(a.get("comment-count")),
+        permalink=str(a.get("permalink") or ""),
+        nsfw="nsfw" in a,
+    )
+    comments: list[Comment] = []
+    for c in doc.css("shreddit-comment"):
+        ca = c.attrib
+        tid = str(ca.get("thingid") or "")
+        if not tid:
+            continue
+        # Deleted and removed comments render no body element; they carry nothing to quote.
+        text_nodes = doc.css(f"#{tid}-comment-rtjson-content")
+        text = _text(text_nodes[0]) if text_nodes else ""
+        if not text:
+            continue
+        comments.append(
+            Comment(
+                id=tid,
+                post_id=str(ca.get("postid") or pid),
+                parent_id=str(ca.get("parentid") or pid),
+                body=text,
+                subreddit=sub,
+                author=str(ca.get("author") or ""),
+                created_at=iso(ca.get("created")),
+                score=_int(ca.get("score")),
+                depth=_int(ca.get("depth")),
+                permalink=str(ca.get("permalink") or ""),
+            )
+        )
+    return Thread(post=post, comments=comments, url=url)
+
+
+# --------------------------------------------------------------------------- fetching
+
+# One gate for every browser launch in the process, so parallel requests cannot stack up browsers.
+_browser_gate = threading.BoundedSemaphore(max(1, settings.max_concurrency))
+
+
+def _html_of(page) -> str:
+    for attr in ("html_content", "body", "text"):
+        v = getattr(page, attr, None)
+        if v:
+            return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+    return ""
+
+
+def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
+    """One stealth-browser fetch. Returns (status, html). Raises ScrapeFailed on browser/network errors."""
+    from scrapling.fetchers import StealthyFetcher
+
+    kwargs = dict(
+        headless=True,
+        disable_resources=True,
+        block_webrtc=True,
+        humanize=False,
+        os_randomize=True,
+        geoip=bool(settings.proxy),
+        proxy=settings.proxy,
+        timeout=settings.fetch_timeout_ms,
+    )
+    if wait_selector:
+        kwargs.update(wait_selector=wait_selector, wait_selector_state="attached")
+    with _browser_gate:
+        try:
+            page = StealthyFetcher.fetch(url, **kwargs)
+        except Exception as e:  # noqa: BLE001 - anything from the browser stack is a vendor failure
+            raise ScrapeFailed(f"browser fetch failed: {type(e).__name__}: {e}"[:300]) from e
+    return int(page.status), _html_of(page)
+
+
+def fetch_page(url: str, fetcher: Fetcher = fetch_html, wait_selector: str | None = None, attempts: int = 2) -> str:
+    """Fetch one page, retrying once when Reddit refuses us. A 404 raises ThreadMissing straight away."""
+    last_err: RedditError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            status, html = fetcher(url, wait_selector)
+        except ScrapeFailed as e:
+            last_err = e
+        else:
+            if status == 404:
+                raise ThreadMissing(f"reddit answered HTTP {status} for {url}")
+            if status == 200 and not is_blocked_page(html):
+                return html
+            last_err = ScrapeBlocked(f"reddit refused the request (HTTP {status}), title={_title_of(html)!r}")
+        log.warning("attempt %d/%d failed for %s: %s", attempt, attempts, url, last_err)
+        if attempt < attempts:
+            time.sleep(settings.retry_delay_s)
+    assert last_err is not None
+    raise last_err
+
+
+def search_term(
+    term: str,
+    max_posts: int = 10,
+    sort: str = "relevance",
+    time_filter: str = "all",
+    include_nsfw: bool = False,
+    fetcher: Fetcher = fetch_html,
+) -> tuple[list[Post], int]:
+    """Posts for one search term, following Reddit's cursor until `max_posts` or MAX_SEARCH_PAGES."""
+    posts: list[Post] = []
+    seen: set[str] = set()
+    url: str | None = build_search_url(term, sort, time_filter)
+    pages = 0
+    while url and pages < settings.max_search_pages and len(posts) < max_posts:
+        html = fetch_page(url, fetcher=fetcher)
+        pages += 1
+        page = parse_search(html, term)
+        fresh = 0
+        for p in page.posts:
+            if p.id in seen or (p.nsfw and not include_nsfw):
+                continue
+            seen.add(p.id)
+            posts.append(p)
+            fresh += 1
+        if fresh == 0:
+            break  # an empty or repeating page means the results are exhausted
+        url = page.next_url
+    return posts[:max_posts], pages
+
+
+def scrape_search(
+    terms: list[str],
+    max_posts: int = 10,
+    sort: str = "relevance",
+    time_filter: str = "all",
+    include_nsfw: bool = False,
+    fetcher: Fetcher = fetch_html,
+    full_bodies: bool | None = None,
+) -> SearchResult:
+    """Run every term in parallel. Posts come back in term order, de-duplicated across terms (the first
+    term that found a post keeps it). Fails only when EVERY term failed; otherwise partial results win."""
+    terms = [t for t in dict.fromkeys(re.sub(r"\s+", " ", str(t or "")).strip() for t in terms) if t]
+    if not terms:
+        raise ValueError("request must include at least one search term (`searchTerms`)")
+    full_bodies = settings.full_bodies if full_bodies is None else full_bodies
+    started = time.time()
+    outcomes: dict[str, tuple[list[Post], int] | RedditError] = {}
+
+    def run(term: str) -> None:
+        try:
+            outcomes[term] = search_term(term, max_posts, sort, time_filter, include_nsfw, fetcher)
+        except RedditError as e:
+            outcomes[term] = e
+
+    with ThreadPoolExecutor(max_workers=len(terms)) as pool:
+        list(pool.map(run, terms))
+
+    posts: list[Post] = []
+    seen: set[str] = set()
+    pages = 0
+    failed: dict[str, str] = {}
+    for term in terms:
+        out = outcomes[term]
+        if isinstance(out, RedditError):
+            failed[term] = str(out)
+            continue
+        found, n = out
+        pages += n
+        for p in found:
+            if p.id not in seen:
+                seen.add(p.id)
+                posts.append(p)
+
+    if len(failed) == len(terms):
+        err = outcomes[terms[0]]
+        assert isinstance(err, RedditError)
+        raise err if isinstance(err, (ScrapeBlocked, ScrapeFailed)) else ScrapeFailed(str(err))
+    if full_bodies and posts:
+        pages += fill_bodies(posts[: settings.max_body_fetches], fetcher, deadline=started + settings.search_budget_s)
+    return SearchResult(posts=posts, pages_fetched=pages, seconds=round(time.time() - started, 1), failed_terms=failed)
+
+
+def fill_bodies(posts: list[Post], fetcher: Fetcher = fetch_html, deadline: float | None = None) -> int:
+    """Replace search snippets with the full post text from each thread page, in place.
+
+    Search results carry no post body (only a snippet, often from a comment), while the Apify actor returned
+    the full body. `Sort Reddit Results` gates and scores on brand mentions in the body and the report prompt
+    quotes it, so bodies matter. Best effort: a thread that fails, or is still queued when `deadline` passes,
+    keeps its snippet, so a busy server answers inside Stage 4's timeout. Returns pages fetched."""
+    fetched = 0
+
+    def run(p: Post) -> None:
+        nonlocal fetched
+        if deadline is not None and time.time() > deadline:
+            return
+        fetched += 1
+        try:
+            t = parse_thread(fetch_page(thread_url(p.permalink), fetcher=fetcher, wait_selector="shreddit-post", attempts=1))
+        except (RedditError, ValueError) as e:
+            log.info("body fetch skipped for %s: %s", p.id, e)
+            return
+        p.body = t.post.body
+        p.body_is_snippet = False
+        # The thread page is fresher than the search index.
+        p.score = t.post.score or p.score
+        p.num_comments = t.post.num_comments or p.num_comments
+
+    with ThreadPoolExecutor(max_workers=max(1, settings.max_concurrency)) as pool:
+        list(pool.map(run, posts))
+    return fetched
+
+
+def scrape_threads(
+    urls: list[str],
+    max_comments_per_post: int = 20,
+    max_comments_total: int | None = None,
+    fetcher: Fetcher = fetch_html,
+) -> ThreadsResult:
+    """Read each thread page in parallel. Missing threads are skipped; fails only when EVERY thread failed
+    for a vendor reason (block or browser crash)."""
+    canonical: list[str] = []
+    for raw in urls:
+        try:
+            u = thread_url(raw)
+        except ValueError:
+            log.warning("skipping non-thread url %r", raw)
+            continue
+        if u not in canonical:
+            canonical.append(u)
+    if not canonical:
+        raise ValueError("request must include at least one reddit thread link (`startUrls`)")
+    canonical = canonical[: settings.max_threads]
+    started = time.time()
+    outcomes: dict[str, Thread | RedditError] = {}
+
+    def run(u: str) -> None:
+        try:
+            outcomes[u] = parse_thread(fetch_page(u, fetcher=fetcher, wait_selector="shreddit-post"), u)
+        except RedditError as e:
+            outcomes[u] = e
+
+    with ThreadPoolExecutor(max_workers=len(canonical)) as pool:
+        list(pool.map(run, canonical))
+
+    threads: list[Thread] = []
+    missing: list[str] = []
+    failed: dict[str, str] = {}
+    budget = max_comments_total if max_comments_total is not None else 10**9
+    for u in canonical:
+        out = outcomes[u]
+        if isinstance(out, ThreadMissing):
+            missing.append(u)
+            continue
+        if isinstance(out, RedditError):
+            failed[u] = str(out)
+            continue
+        keep = out.comments[: max(0, min(max_comments_per_post, budget))]
+        budget -= len(keep)
+        threads.append(Thread(post=out.post, comments=keep, url=u))
+
+    if failed and not threads and not missing:
+        err = outcomes[next(iter(failed))]
+        assert isinstance(err, RedditError)
+        raise err
+    return ThreadsResult(
+        threads=threads,
+        pages_fetched=len(canonical),
+        seconds=round(time.time() - started, 1),
+        missing=missing,
+        failed=failed,
+    )

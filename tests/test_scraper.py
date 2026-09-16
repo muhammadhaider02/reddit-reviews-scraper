@@ -1,0 +1,275 @@
+import pytest
+from conftest import FakeReddit, fixture, set_frozen
+
+from reddit_reviews import scraper
+from reddit_reviews.config import settings
+from reddit_reviews.scraper import (
+    ScrapeBlocked,
+    ScrapeFailed,
+    build_search_url,
+    iso,
+    is_blocked_page,
+    parse_search,
+    parse_thread,
+    scrape_search,
+    scrape_threads,
+    thread_url,
+)
+
+TEXT_THREAD = "https://www.reddit.com/r/Gymshark/comments/1st816z/"
+IMAGE_THREAD = "https://www.reddit.com/r/gymsnark/comments/1pjz4rg/"
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def test_iso_normalises_reddit_timestamps_for_javascript():
+    assert iso("2026-04-23T04:06:19.598000+0000") == "2026-04-23T04:06:19.598Z"
+    assert iso("2026-04-23T04:06:19Z") == "2026-04-23T04:06:19.000Z"
+    assert iso("") == ""
+    assert iso("garbage") == "garbage"
+
+
+def test_search_url_is_literal_and_sanitised():
+    url = build_search_url("Hairbrella reviews", sort="NOPE", time_filter="year")
+    assert url.startswith("https://www.reddit.com/svc/shreddit/search/?")
+    assert "q=Hairbrella+reviews" in url and "type=posts" in url
+    assert "sort=relevance" in url and "t=year" in url
+    assert "disableSpellCorrection=true" in url
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://www.reddit.com/r/Gymshark/comments/1st816z/best_gymshark_tops_review/",
+        "https://old.reddit.com/r/Gymshark/comments/1st816z/",
+        "/r/Gymshark/comments/1ST816Z/best/comment/ohwwsg0/",
+    ],
+)
+def test_thread_url_canonicalises(raw):
+    assert thread_url(raw) == TEXT_THREAD
+
+
+def test_thread_url_rejects_non_threads():
+    with pytest.raises(ValueError):
+        thread_url("https://www.reddit.com/r/Gymshark/")
+
+
+def test_block_page_detected():
+    assert is_blocked_page(fixture("blocked.html"))
+    assert not is_blocked_page(fixture("search_gymshark_reviews.html"))
+    assert not is_blocked_page(fixture("thread_text_post.html"))
+
+
+# --------------------------------------------------------------------------- parsing
+
+
+def test_parse_search_page():
+    page = parse_search(fixture("search_gymshark_reviews.html"), "Gymshark reviews")
+    assert len(page.posts) == 7
+    assert len({p.id for p in page.posts}) == 7
+    assert page.next_url and page.next_url.startswith("https://www.reddit.com/svc/shreddit/search/?")
+    assert "&amp;" not in page.next_url and "cursor=" in page.next_url
+
+    downfall = next(p for p in page.posts if p.id == "t3_1vf53rw")
+    assert downfall.title == "Gymshark downfall"
+    assert downfall.subreddit == "Gymshark"
+    assert (downfall.score, downfall.num_comments) == (19, 32)
+    assert downfall.created_at == "2026-08-04T09:09:44.076Z"
+    assert downfall.permalink == "/r/Gymshark/comments/1vf53rw/gymshark_downfall/"
+    assert downfall.body and downfall.body_is_snippet
+    assert all(p.search_term == "Gymshark reviews" and p.created_at and p.permalink for p in page.posts)
+
+
+def test_search_snippet_from_a_comment_is_never_used_as_the_post_body():
+    page = parse_search(fixture("search_gymshark_reviews.html"))
+    reps = next(p for p in page.posts if p.id == "t3_1strbjn")
+    # Reddit matched a comment in this thread (snippet_id t1_...), so the post has no body of its own here.
+    assert reps.body == ""
+
+
+def test_parse_search_follow_page():
+    page = parse_search(fixture("search_gymshark_reviews_page2.html"))
+    assert len(page.posts) == 7
+    first = {p.id for p in parse_search(fixture("search_gymshark_reviews.html")).posts}
+    assert not first & {p.id for p in page.posts}
+
+
+def test_parse_thread_text_post():
+    t = parse_thread(fixture("thread_text_post.html"), TEXT_THREAD)
+    p = t.post
+    assert (p.id, p.subreddit, p.title) == ("t3_1st816z", "Gymshark", "Best Gymshark Tops review")
+    assert (p.score, p.num_comments) == (17, 21)
+    assert p.created_at == "2026-04-23T04:06:19.598Z"
+    assert p.body.startswith("Onyx V5 Hoodie: Looks really good")
+    assert not p.body_is_snippet
+    assert len(t.comments) == 13
+    c = t.comments[0]
+    assert (c.id, c.depth, c.parent_id, c.author) == ("t1_ohwwsg0", 0, "t3_1st816z", "Randomlogicuser")
+    assert c.body == "Gonna bulk soon?"
+    reply = t.comments[1]
+    assert reply.depth == 1 and reply.parent_id == "t1_ohwwsg0"
+    assert all(x.body and x.created_at and x.subreddit == "Gymshark" for x in t.comments)
+
+
+def test_parse_thread_image_post_has_no_body_but_keeps_comments():
+    t = parse_thread(fixture("thread_image_post.html"), IMAGE_THREAD)
+    assert t.post.body == ""
+    assert t.post.num_comments == 36
+    assert len(t.comments) == 25
+
+
+def test_parse_thread_without_post_is_missing():
+    with pytest.raises(scraper.ThreadMissing):
+        parse_thread("<html><body>nothing here</body></html>")
+
+
+# --------------------------------------------------------------------------- orchestration
+
+
+def search_site(extra: dict | None = None) -> FakeReddit:
+    page1 = fixture("search_gymshark_reviews.html")
+    next_url = parse_search(page1).next_url
+    pages = {
+        build_search_url("Gymshark reviews"): (200, page1),
+        next_url: (200, fixture("search_gymshark_reviews_page2.html")),
+        build_search_url("Hairbrella"): (200, fixture("search_hairbrella.html")),
+        # every body fetch lands on the text thread; good enough to prove bodies are replaced
+        "https://www.reddit.com/r/*": (200, fixture("thread_text_post.html")),
+    }
+    pages.update(extra or {})
+    return FakeReddit(pages)
+
+
+def test_search_follows_cursor_until_max_and_skips_bodies_when_off():
+    site = search_site()
+    res = scrape_search(["Gymshark reviews"], max_posts=10, fetcher=site, full_bodies=False)
+    assert len(res.posts) == 10
+    assert res.pages_fetched == 2
+    assert all(p.body_is_snippet for p in res.posts)
+    assert len(site.calls) == 2
+
+
+def test_search_stops_at_max_search_pages():
+    site = search_site()
+    before = settings.max_search_pages
+    set_frozen(settings, "max_search_pages", 1)
+    try:
+        res = scrape_search(["Gymshark reviews"], max_posts=50, fetcher=site, full_bodies=False)
+    finally:
+        set_frozen(settings, "max_search_pages", before)
+    assert len(res.posts) == 7 and res.pages_fetched == 1
+
+
+def test_search_dedupes_across_terms_and_keeps_term_order():
+    site = search_site()
+    res = scrape_search(["Hairbrella", "Gymshark reviews", "Hairbrella"], max_posts=7, fetcher=site, full_bodies=False)
+    assert len(res.posts) == 14
+    assert [p.search_term for p in res.posts[:7]] == ["Hairbrella"] * 7
+    assert len({p.id for p in res.posts}) == 14
+
+
+def test_search_fills_full_bodies_from_thread_pages():
+    site = search_site()
+    res = scrape_search(["Hairbrella"], max_posts=7, fetcher=site, full_bodies=True)
+    assert all(not p.body_is_snippet for p in res.posts)
+    assert all(p.body.startswith("Onyx V5 Hoodie") for p in res.posts)
+    assert res.pages_fetched == 1 + 7
+
+
+def test_body_fetches_stop_at_the_deadline():
+    site = search_site()
+    posts = parse_search(fixture("search_gymshark_reviews.html")).posts
+    assert scraper.fill_bodies(posts, site, deadline=0) == 0
+    assert all(p.body_is_snippet for p in posts)
+    assert site.calls == []
+
+
+def test_body_fetch_failure_keeps_snippet():
+    site = search_site({"https://www.reddit.com/r/*": (403, fixture("blocked.html"))})
+    res = scrape_search(["Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=True)
+    assert len(res.posts) == 7
+    downfall = next(p for p in res.posts if p.id == "t3_1vf53rw")
+    assert downfall.body_is_snippet and downfall.body
+
+
+def test_search_partial_failure_returns_what_worked():
+    site = search_site({build_search_url("Hairbrella"): (403, fixture("blocked.html"))})
+    res = scrape_search(["Hairbrella", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    assert len(res.posts) == 7
+    assert list(res.failed_terms) == ["Hairbrella"]
+
+
+def test_search_all_blocked_raises_vendor_error():
+    site = FakeReddit(default=(403, fixture("blocked.html")))
+    with pytest.raises(ScrapeBlocked) as e:
+        scrape_search(["Gymshark", "Gymshark reviews"], fetcher=site)
+    # retried once per term
+    assert len(site.calls) == 4
+    # must not look like a brand-side error to Stage 4's BRAND_ERROR_RE
+    import re
+
+    assert not re.search(r"\b404\b|not found|no such (company|business|page)|invalid (url|domain)", str(e.value), re.I)
+
+
+def test_blocked_page_served_with_200_still_counts_as_blocked():
+    site = FakeReddit(default=(200, fixture("blocked.html")))
+    with pytest.raises(ScrapeBlocked):
+        scrape_search(["Gymshark"], fetcher=site)
+
+
+def test_browser_crash_is_retried_then_raised():
+    calls = []
+
+    def crashing(url, wait_selector=None):
+        calls.append(url)
+        raise ScrapeFailed("browser fetch failed: TimeoutError")
+
+    with pytest.raises(ScrapeFailed):
+        scrape_search(["Gymshark"], fetcher=crashing)
+    assert len(calls) == 2
+
+
+def test_search_requires_a_term():
+    with pytest.raises(ValueError):
+        scrape_search(["  ", ""], fetcher=FakeReddit())
+
+
+def test_threads_caps_comments_per_post_and_total():
+    site = FakeReddit({TEXT_THREAD: (200, fixture("thread_text_post.html")), IMAGE_THREAD: (200, fixture("thread_image_post.html"))})
+    res = scrape_threads([TEXT_THREAD, IMAGE_THREAD + "slug/"], max_comments_per_post=10, max_comments_total=15, fetcher=site)
+    assert [len(t.comments) for t in res.threads] == [10, 5]
+    assert [t.post.id for t in res.threads] == ["t3_1st816z", "t3_1pjz4rg"]
+
+
+def test_threads_skip_missing_and_bad_links():
+    site = FakeReddit({TEXT_THREAD: (200, fixture("thread_text_post.html"))})
+    res = scrape_threads([TEXT_THREAD, "https://www.reddit.com/r/x/comments/gone1/", "https://example.com/nope"], fetcher=site)
+    assert len(res.threads) == 1
+    assert res.missing == ["https://www.reddit.com/r/x/comments/gone1/"]
+    assert not res.failed
+
+
+def test_threads_all_blocked_raises():
+    site = FakeReddit(default=(403, fixture("blocked.html")))
+    with pytest.raises(ScrapeBlocked):
+        scrape_threads([TEXT_THREAD, IMAGE_THREAD], fetcher=site)
+
+
+def test_threads_partial_block_keeps_the_rest():
+    site = FakeReddit({TEXT_THREAD: (200, fixture("thread_text_post.html")), IMAGE_THREAD: (403, fixture("blocked.html"))})
+    res = scrape_threads([TEXT_THREAD, IMAGE_THREAD], fetcher=site)
+    assert len(res.threads) == 1 and list(res.failed) == [IMAGE_THREAD]
+
+
+def test_threads_require_a_thread_link():
+    with pytest.raises(ValueError):
+        scrape_threads(["https://example.com"], fetcher=FakeReddit())
+
+
+@pytest.mark.live
+def test_live_search_and_thread():
+    res = scrape_search(["Gymshark reviews"], max_posts=3, full_bodies=False)
+    assert res.posts, res
+    t = scrape_threads([res.posts[0].permalink], max_comments_per_post=5)
+    assert t.threads and t.threads[0].post.id == res.posts[0].id

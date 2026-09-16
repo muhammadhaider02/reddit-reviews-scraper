@@ -1,0 +1,33 @@
+[project]
+name = "reddit-reviews"
+version = "0.1.0"
+description = "Self-hosted Reddit scraper: a drop-in HTTP replacement for the Apify actor used by the Stage 4 research workflow"
+readme = "README.md"
+authors = [
+    { name = "Ahmad Abdul Hameed", email = "i220609@nu.edu.pk" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "python-dotenv>=1.2.3",
+    "scrapling[fetchers]>=0.4.8",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.scripts]
+reddit-reviews = "reddit_reviews:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: hits reddit.com through the stealth browser (deselect with -m 'not live')"]
+addopts = "-m 'not live'"
