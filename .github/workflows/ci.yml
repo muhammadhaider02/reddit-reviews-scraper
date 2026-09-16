@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: uv python install 3.11
+      - run: uv sync --frozen
+      # includes tests/test_stage4_nodes.py, which runs Stage 4's own Code nodes with node
+      - run: uv run pytest -q
+
+  docker-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      API_TOKEN: ci-smoke-token
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t reddit-reviews:ci .
+
+      - name: Start container
+        run: |
+          docker run -d --name scraper -p 8001:8001 -e API_TOKEN="$API_TOKEN" reddit-reviews:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8001/health && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8001/health
+
+      - name: Auth is enforced
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8001/reddit \
+            -H 'Content-Type: application/json' -d '{"searchTerms":["gymshark"]}')
+          test "$code" = "401"
+
+      - name: Bad request is 400
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8001/reddit \
+            -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' -d '{"maxPostsCount":10}')
+          test "$code" = "400"
+
+      # GitHub runners are datacenter IPs, which Reddit usually blocks. A 503 here proves the block is
+      # reported as a vendor failure; a 200 proves the scrape. Anything else fails the job.
+      - name: Live search through the container
+        run: |
+          curl -s --max-time 280 -o out.json -w 'status=%{http_code} secs=%{time_total}\n' \
+            -X POST http://127.0.0.1:8001/reddit \
+            -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+            -d '{"searchTerms":["gymshark reviews"],"maxPostsCount":3,"fullBodies":false}' | tee status.txt
+          python3 -c "
+          import json, re; s=open('status.txt').read(); d=json.load(open('out.json'))
+          if 'status=200' in s:
+              assert isinstance(d, list) and d and d[0]['dataType'] == 'post', d
+              print(f'{len(d)} posts, first: {d[0][\"title\"]!r}')
+          elif 'status=503' in s:
+              assert d['error']['type'] in ('ScrapeBlocked', 'ScrapeFailed'), d
+              print('blocked from this runner (expected on datacenter IPs):', d['error']['message'])
+          else:
+              raise SystemExit(s)
+          "
+
+      - name: Container logs
+        if: always()
+        run: docker logs scraper
