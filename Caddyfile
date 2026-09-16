@@ -3,30 +3,41 @@
 #
 # The container publishes on 127.0.0.1 only (see docker-compose.yml), so this is the sole
 # public route in. Install on the host, not in the container: `apt install caddy`.
+
+# Timeouts are a GLOBAL server option in Caddy v2, not a site directive - a `timeouts` block
+# inside the site below is a parse error and Caddy will refuse to start.
+#
+# A full-bodies search is bounded by SEARCH_BUDGET_S (200s) plus one in-flight
+# FETCH_TIMEOUT_MS (45s) and a retry pause, so ~250s worst case; Stage 4's own node timeout
+# is 290s. Keep write above both, or Caddy cuts off scrapes the app would have finished.
+#
+# Note these apply to every site this Caddy instance serves, including trustpilot-reviews if
+# it shares the host. That is fine here - both are slow scrapers wanting the same generous
+# window - but it is not a per-site setting.
+{
+	servers {
+		timeouts {
+			read_body   30s
+			write       300s
+			idle        320s
+		}
+	}
+}
+
 reddit.example.com {
-    reverse_proxy 127.0.0.1:8001
+	reverse_proxy 127.0.0.1:8001
 
-    # A search call with full bodies is the long one: SEARCH_BUDGET_S (200s) before no new
-    # body fetch starts, plus the in-flight fetch's FETCH_TIMEOUT_MS (45s) and a retry pause,
-    # so ~250s worst case. Stage 4's own node timeout is 290s. Keep write above both, or Caddy
-    # will cut off scrapes that the app and the caller would have finished.
-    timeouts {
-        read_body   30s
-        write       300s
-        idle        320s
-    }
+	# /health is unauthenticated by design so uptime checks can reach it, but it exposes
+	# request counters. Uncomment to keep it off the public internet.
+	# @health path /health
+	# handle @health {
+	#     @external not remote_ip 127.0.0.1 <your-monitoring-ip>
+	#     respond @external 403
+	# }
 
-    # /health is unauthenticated by design so uptime checks can reach it, but it exposes
-    # request counters. Uncomment to keep it off the public internet.
-    # @health path /health
-    # handle @health {
-    #     @external not remote_ip 127.0.0.1 <your-monitoring-ip>
-    #     respond @external 403
-    # }
-
-    encode gzip
-    log {
-        output file /var/log/caddy/reddit-reviews.log
-        format json
-    }
+	encode gzip
+	log {
+		output file /var/log/caddy/reddit-reviews.log
+		format json
+	}
 }
