@@ -135,17 +135,69 @@ Measured on a residential connection: a search page in ~5 s, a thread page in ~8
 
 ## Deployment
 
-Production runs as a single Docker container on a Linux VPS. The `Dockerfile` installs the stealth browser into `/opt/cache` and runs the service as a non-root user on port 8001; put a reverse proxy with TLS in front of it and set `API_TOKEN`.
+Production runs as a single Docker container on a Linux VPS, behind a TLS reverse proxy.
+`docker-compose.yml` is the deployment topology — it carries the memory limits, process
+reaping and log rotation that a bare `docker run` would not.
 
 ```bash
-docker build -t reddit-reviews .
-docker run -d --restart unless-stopped -p 8001:8001 --env-file .env reddit-reviews
+git clone https://github.com/haider-ecombench/reddit-reviews.git
+cd reddit-reviews
+cp .env.example .env          # set API_TOKEN
+docker compose up -d --build  # first build is slow: it downloads Chromium
 ```
 
-Check from the server itself before pointing anything at it; Reddit blocks by IP:
+Then point `Caddyfile` at your domain and `caddy reload`. The container publishes on
+`127.0.0.1:8001` only, so the reverse proxy is the sole public route in — **note that
+`docker run -p 8001:8001` would bypass UFW entirely and expose the API publicly**.
+
+Check from the server itself before pointing anything at it; Reddit blocks by IP, and a
+datacenter address will likely need `SCRAPER_PROXY` set to a residential proxy:
 
 ```bash
-docker exec <container> uv run --no-sync reddit-reviews search "gymshark reviews" --max 3
+docker compose exec scraper uv run --no-sync reddit-reviews search "gymshark reviews" --max 3
 ```
 
-GitHub Actions CI runs the tests on every push to `main`, then builds the image and exercises `/health`, token enforcement, the `400` path and a live search (a `503` block is accepted there, since runners are datacenter IPs).
+### Sizing
+
+Measured against a live container, not estimated:
+
+| | |
+|---|---|
+| Idle | 43 MiB |
+| Peak, `MAX_CONCURRENCY=1` | 350 MiB |
+| Peak, `MAX_CONCURRENCY=3` | 859 MiB |
+| Per additional Chromium | ~254 MiB |
+
+Scrapling launches and tears down a browser per fetch, so memory is spiky, not cumulative;
+with `FULL_BODIES=true` a search call is a long run of them, so the peak is held for minutes
+rather than touched once. `MAX_CONCURRENCY` keeps the app inside its budget; the `mem_limit`
+in `docker-compose.yml` is a blast-radius guard for the host — reaching it means the kernel
+OOM-kills the container and drops in-flight scrapes. 2 GB fits the default `MAX_CONCURRENCY=3`
+with roughly 2.4× headroom, which leaves a 4 GB VPS room for `trustpilot-reviews` beside it.
+
+Do not lower `MAX_CONCURRENCY` to save memory. The same 6-post search with full bodies took
+**101 s at 3 and 239 s at 1**, against Stage 4's 290 s node timeout — concurrency is a latency
+budget here, not only a memory knob. The `Caddyfile` timeouts are sized to the same worst case:
+`SEARCH_BUDGET_S` (200 s) plus one in-flight `FETCH_TIMEOUT_MS` (45 s) and a retry pause, so
+~250 s, which is why `write` is 300 s.
+
+### Builds
+
+The image is ~4.8 GB, nearly all of it Chromium and its system libraries.
+
+| | |
+|---|---|
+| Cold build | ~9m40s |
+| Rebuild after a code change | **10–15s** (was 4m11s) |
+| Build context | 356 kB (was ~260 MB) |
+
+The layer order is what makes the rebuild cheap: dependencies install from the lockfile alone
+(`--no-install-project`), and the recursive `chown` — a multi-GB layer, because it covers the
+browser cache — sits *above* `COPY src`, so a code edit rewrites only the source and the
+project install. `.dockerignore` is what keeps the context at 356 kB: once you have run the
+Quickstart, `.venv` alone is 258 MB of host-platform wheels that the image can never use — it
+rebuilds dependencies from `uv.lock` inside the image instead.
+
+CI runs on every push to `main`: unit and Stage 4 node tests, then a full image build that
+starts the container and exercises `/health`, token enforcement, the `400` path and a live
+search (a `503` block is accepted there, since GitHub runners are datacenter IPs).
