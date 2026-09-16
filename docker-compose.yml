@@ -1,0 +1,58 @@
+# Production topology: one container behind a TLS reverse proxy on the host.
+#
+# Memory model. Scrapling launches a full Chromium per fetch and tears it down again
+# (StealthyFetcher.fetch -> `with StealthySession(...)`), so usage is spiky, not cumulative:
+#   peak ~= MAX_CONCURRENCY x one browser (~254 MiB) + the Python process
+# A search call with FULL_BODIES=true is a long run of these - one page per post, up to
+# MAX_BODY_FETCHES - so the peak is held for minutes rather than touched once.
+# MAX_CONCURRENCY is what keeps the app inside its budget. mem_limit below is a blast-radius
+# guard for the host: hitting it means the kernel OOM-kills the container, dropping in-flight
+# scrapes. Size MAX_CONCURRENCY so you never reach it.
+services:
+  scraper:
+    build: .
+    image: reddit-reviews:latest
+    container_name: reddit-reviews
+    restart: unless-stopped
+    env_file: .env
+
+    # Loopback only. Docker publishes ports straight past UFW, so 8001:8001 would put the
+    # API on the public internet no matter what the firewall says. The reverse proxy is
+    # the only thing that should reach it.
+    #
+    # 8001 keeps it clear of trustpilot-reviews on 8000; the two run side by side.
+    ports:
+      - "127.0.0.1:8001:8001"
+
+    # Measured on this image, not estimated: idle 43 MiB, peak 859 MiB at MAX_CONCURRENCY=3
+    # (~254 MiB per additional Chromium). 2g is ~2.4x the observed peak and leaves room for
+    # trustpilot-reviews beside it on a 4GB box. Raise it if you raise MAX_CONCURRENCY.
+    #
+    # Do NOT lower MAX_CONCURRENCY to save memory. At 1 the peak drops to 350 MiB but the same
+    # 6-post search took 239s instead of 101s, against Stage 4's 290s node timeout. Concurrency
+    # is a latency budget here, not just a memory knob.
+    #
+    # memswap_limit == mem_limit disables swap for the container: a browser thrashing swap is
+    # slower and harder to diagnose than one that dies.
+    mem_limit: 2g
+    memswap_limit: 2g
+    mem_reservation: 512m
+
+    # Chromium forks heavily and a fetch that times out can orphan its process tree.
+    # init: true runs a real init as PID 1 so those get reaped instead of accumulating
+    # as zombies; pids_limit stops a fork storm from taking the host down with it.
+    init: true
+    pids_limit: 512
+
+    # Scrapling already passes --disable-dev-shm-usage, so Chromium puts shared memory in
+    # /tmp on disk rather than /dev/shm. This is insurance for the paths that ignore that
+    # flag, not the main lever. Deliberately NOT a tmpfs /tmp: tmpfs pages count against
+    # mem_limit, so it would eat the browser's own budget.
+    shm_size: 256m
+
+    # Chromium is verbose. Without this the json log grows until the disk fills.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

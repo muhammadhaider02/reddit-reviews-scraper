@@ -1,0 +1,32 @@
+# TLS terminator in front of the scraper. Caddy obtains and renews the certificate itself,
+# so the DNS A record must already point here before it starts.
+#
+# The container publishes on 127.0.0.1 only (see docker-compose.yml), so this is the sole
+# public route in. Install on the host, not in the container: `apt install caddy`.
+reddit.example.com {
+    reverse_proxy 127.0.0.1:8001
+
+    # A search call with full bodies is the long one: SEARCH_BUDGET_S (200s) before no new
+    # body fetch starts, plus the in-flight fetch's FETCH_TIMEOUT_MS (45s) and a retry pause,
+    # so ~250s worst case. Stage 4's own node timeout is 290s. Keep write above both, or Caddy
+    # will cut off scrapes that the app and the caller would have finished.
+    timeouts {
+        read_body   30s
+        write       300s
+        idle        320s
+    }
+
+    # /health is unauthenticated by design so uptime checks can reach it, but it exposes
+    # request counters. Uncomment to keep it off the public internet.
+    # @health path /health
+    # handle @health {
+    #     @external not remote_ip 127.0.0.1 <your-monitoring-ip>
+    #     respond @external 403
+    # }
+
+    encode gzip
+    log {
+        output file /var/log/caddy/reddit-reviews.log
+        format json
+    }
+}

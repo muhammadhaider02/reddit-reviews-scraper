@@ -1,0 +1,30 @@
+# The build context is sent to the Docker daemon in full before anything runs.
+# .venv is the big one once anyone has followed the Quickstart: ~260MB of host-platform
+# wheels the image must never use - it rebuilds dependencies from uv.lock inside the image.
+.venv/
+venv/
+env/
+
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Secrets must never land in an image layer.
+.env
+.env.*
+!.env.example
+
+# 1.3MB of saved Reddit pages, used only by pytest on the host.
+tests/
+Dockerfile
+docker-compose.yml
+Caddyfile
+
+# Scrape output, if anyone ran the CLI here.
+output/
+*_reddit.json
+*_reddit.csv
+*.log
