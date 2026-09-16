@@ -4,7 +4,7 @@
 
 **SEARCH. READ. SERVE.**
 
-[![CI](https://github.com/haider-ecombench/reddit-reviews/actions/workflows/ci.yml/badge.svg)](https://github.com/haider-ecombench/reddit-reviews/actions/workflows/ci.yml)
+[![CI](https://github.com/haider-ecombench/reddit-reviews-scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/haider-ecombench/reddit-reviews-scraper/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![uv](https://img.shields.io/badge/uv-Package_Manager-DE5FE9?logo=uv&logoColor=white)](https://docs.astral.sh/uv/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -140,8 +140,8 @@ Production runs as a single Docker container on a Linux VPS, behind a TLS revers
 reaping and log rotation that a bare `docker run` would not.
 
 ```bash
-git clone https://github.com/haider-ecombench/reddit-reviews.git
-cd reddit-reviews
+git clone https://github.com/haider-ecombench/reddit-reviews-scraper.git
+cd reddit-reviews-scraper
 cp .env.example .env          # set API_TOKEN
 docker compose up -d --build  # first build is slow: it downloads Chromium
 ```
