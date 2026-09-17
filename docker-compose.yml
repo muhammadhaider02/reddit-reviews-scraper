@@ -1,4 +1,9 @@
-# Production topology: one container behind a TLS reverse proxy on the host.
+# Production topology: one container beside n8n on the same VPS, on n8n's Docker network.
+#
+# There is no reverse proxy and no public route here. n8n reaches the API by container name
+# over the shared network (http://reddit-reviews:8001), so nothing is published to the host and
+# nothing is reachable from the internet. The VPS already runs Traefik on 80/443 for n8n's own
+# UI - do not add a second proxy, it would fail to bind.
 #
 # Memory model. Scrapling launches a full Chromium per fetch and tears it down again
 # (StealthyFetcher.fetch -> `with StealthySession(...)`), so usage is spiky, not cumulative:
@@ -16,13 +21,14 @@ services:
     restart: unless-stopped
     env_file: .env
 
-    # Loopback only. Docker publishes ports straight past UFW, so 8001:8001 would put the
-    # API on the public internet no matter what the firewall says. The reverse proxy is
-    # the only thing that should reach it.
+    # No `ports:` on purpose. Publishing would expose the API on the host - and Docker
+    # publishes straight past UFW, so even 8001:8001 behind a firewall would be public.
+    # Reachable only from containers on the network below. To poke at it from the host:
+    #   docker exec reddit-reviews python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8001/health').read())"
     #
-    # 8001 keeps it clear of trustpilot-reviews on 8000; the two run side by side.
-    ports:
-      - "127.0.0.1:8001:8001"
+    # 8001 still keeps it clear of trustpilot-reviews on 8000; the two run side by side.
+    networks:
+      - n8n
 
     # Measured on this image, not estimated: idle 43 MiB, peak 859 MiB at MAX_CONCURRENCY=3
     # (~254 MiB per additional Chromium). 2g is ~2.4x the observed peak and leaves room for
@@ -56,9 +62,27 @@ services:
     # mem_limit, so it would eat the browser's own budget.
     shm_size: 256m
 
+    # Docker's default is 10s, which SIGKILLs every in-flight scrape on redeploy: uvicorn stops
+    # accepting and waits for the handler, and that handler is blocked on a scrape that may
+    # legitimately run for SCRAPE_BUDGET_S. 210s is that budget plus slack for Chromium teardown.
+    # It is only this low because the budget reserves a whole fetch's cost before starting one,
+    # so nothing is still running at the deadline; without that reservation the honest number
+    # would be 200 + FETCH_TIMEOUT_MS. Costs nothing when nothing is in flight; Docker stops as
+    # soon as the process exits. Raise it with SCRAPE_BUDGET_S, never below it.
+    stop_grace_period: 210s
+
     # Chromium is verbose. Without this the json log grows until the disk fills.
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+# n8n's Compose project creates this network as <project>_default. Declared external so this
+# file never creates or owns it - n8n's stack does. If the name is wrong the container refuses
+# to start with `network n8n_default declared as external, but could not be found`, which names
+# the fix; check with `docker network ls`. Nothing else is affected when it fails.
+networks:
+  n8n:
+    external: true
+    name: n8n_default

@@ -21,7 +21,6 @@ __pycache__/
 tests/
 Dockerfile
 docker-compose.yml
-Caddyfile
 
 # Scrape output, if anyone ran the CLI here.
 output/
