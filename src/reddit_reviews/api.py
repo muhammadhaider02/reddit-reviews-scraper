@@ -34,10 +34,47 @@ log = logging.getLogger("reddit_reviews.api")
 counters = {"requests": 0, "search": 0, "threads": 0, "ok": 0, "empty": 0, "partial": 0, "blocked": 0, "failed": 0, "bad_request": 0, "truncated": 0, "in_flight": 0}
 
 
+def _log_egress() -> None:
+    """Say which IP we actually leave from, once, at startup.
+
+    A misconfigured proxy and a blocked IP fail identically - both are a 403 from Reddit - so
+    without this a wrong credential reads as "Reddit blocked us again" and costs an afternoon.
+    Best effort by design: never block startup on it, and never log the credential itself.
+    """
+    import json
+    import urllib.request
+
+    from .scraper import STICKY_PORT_RANGE, proxy_config
+
+    try:
+        proxy = proxy_config(STICKY_PORT_RANGE[0])
+    except ValueError as e:  # a malformed credential should be loud, but not fatal here
+        log.error("SCRAPER_PROXY is unusable, scrapes will run direct and Reddit will block them: %s", e)
+        return
+    if not proxy:
+        log.warning("no SCRAPER_PROXY set - fetches leave from this host's own IP, which Reddit blocks")
+        return
+    try:
+        server = proxy["server"] if isinstance(proxy, dict) else proxy
+        handler = urllib.request.ProxyHandler({"http": server, "https": server})
+        if isinstance(proxy, dict) and proxy.get("username"):
+            mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            mgr.add_password(None, server, proxy["username"], proxy["password"])
+            opener = urllib.request.build_opener(handler, urllib.request.ProxyBasicAuthHandler(mgr))
+        else:
+            opener = urllib.request.build_opener(handler)
+        with opener.open("https://ip.decodo.com/json", timeout=20) as r:
+            ip = (json.loads(r.read()).get("proxy") or {}).get("ip")
+        log.info("proxy is attached: fetches leave from %s (sticky port %d)", ip, STICKY_PORT_RANGE[0])
+    except Exception as e:  # noqa: BLE001 - a failed probe must never stop the service booting
+        log.warning("could not confirm the proxy egress IP (%s: %s) - scrapes will still try it", type(e).__name__, e)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if not settings.api_token:
         log.warning("API_TOKEN is not set - the scraper endpoint is unauthenticated")
+    await asyncio.to_thread(_log_egress)
     yield
 
 

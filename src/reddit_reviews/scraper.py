@@ -18,13 +18,15 @@ from __future__ import annotations
 import html as htmllib
 import json
 import logging
+import random
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import urlencode
 
 from scrapling.parser import Selector
@@ -364,6 +366,75 @@ def parse_thread(html: str, url: str = "") -> Thread:
 # One gate for every browser launch in the process, so parallel requests cannot stack up browsers.
 _browser_gate = threading.BoundedSemaphore(max(1, settings.max_concurrency))
 
+# Decodo exposes the same residential pool on two kinds of port. 7000 is the ROTATING gateway: a new
+# exit IP per request, which would move us mid-scrape and hand Reddit a fresh address for every page.
+# The 10001+ band is sticky - the gateway pins one exit IP to that port for the session window - so
+# the port number is effectively the session handle, and a different port is the only way to reach a
+# different exit. Half-open, so the usable ports are 10001..10099.
+STICKY_PORT_RANGE = (10001, 10100)
+ROTATING_GATEWAY_PORT = "7000"
+
+
+def proxy_config(port: int | None = None) -> dict[str, str] | str | None:
+    """SCRAPER_PROXY as Scrapling wants it, with `port` overriding the configured one.
+
+    Two accepted forms. Anything containing '://' is a plain proxy URL and is passed through
+    untouched (no rotation applies). Otherwise it is Decodo's four-field `host:port:user:pass`,
+    which is split at most THREE times because the password may itself contain ':' - everything
+    after the third colon belongs to it.
+
+    Returns Playwright's proxy dict rather than a URL on purpose. Scrapling would accept a URL, but
+    it parses one with urlparse, which does no percent-decoding: a password containing '%', '@' or
+    ':' would authenticate with the wrong value or fail to parse outright. The dict does no string
+    surgery at all.
+    """
+    raw = (settings.proxy or "").strip()
+    if not raw:
+        return None
+    if "://" in raw:
+        return raw
+    # Deliberately unguarded: a credential with fewer than four fields raises ValueError here, and a
+    # config fault should stop the scrape rather than silently let it run from the blocked server IP.
+    host, configured, user, pw = raw.split(":", 3)
+    if configured == ROTATING_GATEWAY_PORT:
+        raise ValueError(
+            f"SCRAPER_PROXY points at Decodo's rotating gateway (port {ROTATING_GATEWAY_PORT}). "
+            f"Use a sticky port ({STICKY_PORT_RANGE[0]}): one exit IP has to serve a whole fetch."
+        )
+    # http:// and not socks5://: Chromium ignores SOCKS credentials, so an authenticated socks5 proxy
+    # silently drops the username and password and the gateway refuses the connection.
+    return {"server": f"http://{host}:{port if port is not None else configured}", "username": user, "password": pw}
+
+
+class _PortPool:
+    """Hands each in-flight fetch a sticky port no other in-flight fetch is holding.
+
+    Two browsers leaving from one residential exit at the same time is a fingerprint, and drawing a
+    port at random per call is not enough to prevent it - independent draws collide. Ports are held
+    for exactly as long as the browser using them, so with MAX_CONCURRENCY permits against ~99 ports
+    this can never exhaust.
+    """
+
+    def __init__(self, lo: int, hi: int) -> None:
+        self._free = set(range(lo, hi))
+        self._lock = threading.Lock()
+
+    @contextmanager
+    def lease(self) -> Iterator[int | None]:
+        with self._lock:
+            # Random rather than sequential so repeated runs do not keep re-drawing the same exits.
+            port = random.choice(sorted(self._free)) if self._free else None
+            self._free.discard(port)
+        try:
+            yield port
+        finally:
+            if port is not None:
+                with self._lock:
+                    self._free.add(port)
+
+
+_port_pool = _PortPool(*STICKY_PORT_RANGE)
+
 
 def _fetch_cost_s(attempts: int = ATTEMPTS) -> float:
     """Worst case wall clock for one fetch_page call: every attempt times out, plus our pauses.
@@ -399,7 +470,9 @@ def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
         # this layer just repeats blindly. fetch_page's `except ScrapeFailed` is now the only
         # crash retry in the stack - deleting it turns one flaky Chromium launch into a 503.
         retries=1,
-        proxy=settings.proxy,
+        # Resolve DNS inside the proxy tunnel. Without it Chromium resolves reddit.com against the
+        # container's resolver, which leaks the real egress around a proxy that exists to hide it.
+        dns_over_https=True,
         timeout=settings.fetch_timeout_ms,
     )
     # Removed 2026-09-17: humanize / os_randomize / geoip. They are Camoufox-era (scrapling 0.2.x)
@@ -408,11 +481,21 @@ def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
     # server, do not rule them out as already tried; they were never on.
     if wait_selector:
         kwargs.update(wait_selector=wait_selector, wait_selector_state="attached")
-    with _browser_gate:
+    # One sticky exit per fetch, held only while this browser lives. Because fetch_page calls the
+    # fetcher once per attempt, a retry automatically lands on a DIFFERENT exit - which is the whole
+    # point: Reddit refuses some residential exits outright, and waiting never changes that verdict.
+    with _port_pool.lease() as port, _browser_gate:
+        proxy = proxy_config(port)
+        if proxy:
+            kwargs["proxy"] = proxy
         try:
             page = StealthyFetcher.fetch(url, **kwargs)
         except Exception as e:  # noqa: BLE001 - anything from the browser stack is a vendor failure
-            raise ScrapeFailed(f"browser fetch failed: {type(e).__name__}: {e}"[:300]) from e
+            # The port, never the credential: logging the proxy dict would put the password in the
+            # container log and in every error the API returns.
+            via = f" (exit port {port})" if proxy and port else ""
+            raise ScrapeFailed(f"browser fetch failed{via}: {type(e).__name__}: {e}"[:300]) from e
+    log.debug("fetched %s via exit port %s", url, port if proxy else "direct")
     return int(page.status), _html_of(page)
 
 

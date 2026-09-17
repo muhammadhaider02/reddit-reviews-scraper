@@ -350,6 +350,85 @@ def test_threads_are_not_truncated_on_a_normal_run():
     assert res.truncated is False
 
 
+# --------------------------------------------------------------------------- proxy
+
+
+@pytest.fixture
+def proxy_value():
+    """Set SCRAPER_PROXY on the frozen settings singleton, restoring it afterwards."""
+    before = settings.proxy
+    yield lambda v: set_frozen(settings, "proxy", v)
+    set_frozen(settings, "proxy", before)
+
+
+def test_proxy_config_keeps_a_password_containing_colons(proxy_value):
+    # Decodo passwords routinely contain ':'. An uncapped split would truncate the password at the
+    # first one and authenticate with a prefix, which reads downstream as "Reddit blocked us".
+    proxy_value("us.decodo.com:10001:user:pa:ss:word")
+    assert scraper.proxy_config() == {
+        "server": "http://us.decodo.com:10001",
+        "username": "user",
+        "password": "pa:ss:word",
+    }
+
+
+def test_proxy_config_port_override_picks_the_exit(proxy_value):
+    proxy_value("us.decodo.com:10001:user:pw")
+    assert scraper.proxy_config(10042)["server"] == "http://us.decodo.com:10042"
+
+
+def test_proxy_config_refuses_the_rotating_gateway(proxy_value):
+    # Port 7000 hands out a new exit IP per request, which would move us mid-scrape.
+    proxy_value("us.decodo.com:7000:user:pw")
+    with pytest.raises(ValueError, match="rotating gateway"):
+        scraper.proxy_config()
+
+
+def test_proxy_config_passes_a_plain_url_through(proxy_value):
+    # Someone using a non-Decodo proxy should keep working; rotation simply does not apply.
+    proxy_value("http://user:pw@some.proxy:8080")
+    assert scraper.proxy_config(10042) == "http://user:pw@some.proxy:8080"
+
+
+def test_proxy_config_is_none_when_unset(proxy_value):
+    proxy_value(None)
+    assert scraper.proxy_config() is None
+
+
+def test_proxy_config_rejects_a_malformed_credential(proxy_value):
+    # Better to stop than to quietly scrape from the blocked server IP.
+    proxy_value("us.decodo.com:10001:user")
+    with pytest.raises(ValueError):
+        scraper.proxy_config()
+
+
+def test_port_pool_never_hands_the_same_port_to_two_holders():
+    pool = scraper._PortPool(10001, 10004)  # 3 ports
+    with pool.lease() as a, pool.lease() as b, pool.lease() as c:
+        assert len({a, b, c}) == 3, "two concurrent browsers on one exit IP is a fingerprint"
+        assert all(10001 <= p < 10004 for p in (a, b, c))
+        with pool.lease() as d:
+            assert d is None, "exhaustion yields None rather than a duplicate"
+    # everything returned
+    with pool.lease() as e:
+        assert e is not None
+
+
+def test_port_pool_releases_on_exception():
+    pool = scraper._PortPool(10001, 10002)  # exactly one port
+    with pytest.raises(RuntimeError):
+        with pool.lease() as first:
+            assert first == 10001
+            raise RuntimeError("boom")
+    with pool.lease() as again:
+        assert again == 10001, "a crashed fetch must not leak its exit port"
+
+
+def test_sticky_range_is_wider_than_the_browser_gate():
+    lo, hi = scraper.STICKY_PORT_RANGE
+    assert hi - lo > settings.max_concurrency, "the pool must never exhaust under normal concurrency"
+
+
 # --------------------------------------------------------------------------- browser contract
 
 
@@ -378,6 +457,77 @@ def test_fetch_html_pins_the_scrapling_kwargs(monkeypatch):
     assert not {"humanize", "os_randomize", "geoip"} & set(seen)
     assert seen["block_webrtc"] is True, "this one is real, unlike the three above"
     assert seen["disable_resources"] is settings.block_resources
+    # DNS inside the tunnel, or the container's resolver leaks the egress a proxy exists to hide.
+    assert seen["dns_over_https"] is True
+
+
+def test_fetch_html_sends_the_proxy_as_a_dict_on_a_sticky_port(monkeypatch, proxy_value):
+    """Scrapling accepts a URL too, but parses it with urlparse, which does no percent-decoding -
+    a password containing '%', '@' or ':' would authenticate wrong. The dict does no string surgery."""
+    import scrapling.fetchers as fetchers
+
+    seen = {}
+
+    class FakePage:
+        status = 200
+        html_content = "<html></html>"
+
+    class FakeFetcher:
+        @classmethod
+        def fetch(cls, url, **kwargs):
+            seen.update(kwargs)
+            return FakePage()
+
+    monkeypatch.setattr(fetchers, "StealthyFetcher", FakeFetcher)
+    proxy_value("us.decodo.com:10001:user:pw")
+    scraper.fetch_html("https://www.reddit.com/x")
+
+    proxy = seen["proxy"]
+    assert isinstance(proxy, dict), "a URL string would be re-parsed lossily by scrapling"
+    assert set(proxy) == {"server", "username", "password"}
+    assert proxy["username"] == "user" and proxy["password"] == "pw"
+    lo, hi = scraper.STICKY_PORT_RANGE
+    port = int(proxy["server"].rsplit(":", 1)[1])
+    assert lo <= port < hi, "the fetch must leave from a drawn sticky port, not the configured one"
+
+
+def test_fetch_html_omits_proxy_entirely_when_unset(monkeypatch, proxy_value):
+    import scrapling.fetchers as fetchers
+
+    seen = {}
+
+    class FakePage:
+        status = 200
+        html_content = "<html></html>"
+
+    class FakeFetcher:
+        @classmethod
+        def fetch(cls, url, **kwargs):
+            seen.update(kwargs)
+            return FakePage()
+
+    monkeypatch.setattr(fetchers, "StealthyFetcher", FakeFetcher)
+    proxy_value(None)
+    scraper.fetch_html("https://www.reddit.com/x")
+    assert "proxy" not in seen, "passing proxy=None differs from omitting it only by noise"
+
+
+def test_a_failed_fetch_names_the_port_but_never_the_credential(monkeypatch, proxy_value):
+    import scrapling.fetchers as fetchers
+
+    class FakeFetcher:
+        @classmethod
+        def fetch(cls, url, **kwargs):
+            raise RuntimeError("Target closed")
+
+    monkeypatch.setattr(fetchers, "StealthyFetcher", FakeFetcher)
+    proxy_value("us.decodo.com:10001:user:sup3rs3cret")
+
+    with pytest.raises(ScrapeFailed) as ei:
+        scraper.fetch_html("https://www.reddit.com/x")
+    msg = str(ei.value)
+    assert "exit port" in msg, "the port is what makes a bad exit diagnosable"
+    assert "sup3rs3cret" not in msg and "user" not in msg, "credentials must never reach a log or an API error"
 
 
 def test_fetch_html_passes_the_wait_selector_only_when_asked(monkeypatch):

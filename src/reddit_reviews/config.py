@@ -24,8 +24,13 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     # Shared secret n8n sends as `Authorization: Bearer <token>`. Empty = no auth (local testing only).
     api_token: str = os.environ.get("API_TOKEN", "").strip()
-    # Optional proxy URL passed straight to Scrapling. Apify ran this actor on RESIDENTIAL proxies, and
-    # Reddit's "blocked by network security" wall is IP-based, so a datacenter host will likely need one.
+    # Residential proxy. Not optional on a datacenter host: Reddit's "blocked by network security"
+    # wall is IP-based, and measured 2026-09-17, this VPS gets a 403 block page for every request
+    # while a residential IP gets 200 for the same URL, same second - curl, Chromium and Firefox
+    # alike, so it is the address and not the browser. The Apify actor this replaces paid for
+    # RESIDENTIAL proxies for the same reason.
+    # Two forms, parsed by scraper.proxy_config(): a plain URL (http://user:pass@host:port), or
+    # Decodo's `host:port:user:pass`. Use a STICKY port (10001+), never the rotating gateway (7000).
     proxy: str | None = os.environ.get("SCRAPER_PROXY", "").strip() or None
     # Browser fetches allowed at once, across ALL requests. Stage 4 sends 3 search terms, then up to 8 threads.
     max_concurrency: int = _env_int("MAX_CONCURRENCY", 3)
