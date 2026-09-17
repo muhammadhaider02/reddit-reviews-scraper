@@ -44,6 +44,11 @@ BLOCK_MARKERS = ("blocked by network security", "whoa there, pardner", "you've b
 THREAD_PATH_RE = re.compile(r"/r/([A-Za-z0-9_]+)/comments/([a-z0-9]+)", re.I)
 NEXT_CURSOR_RE = re.compile(r'src="(/svc/shreddit/search/\?[^"]*cursor=[^"]*)"')
 
+# Fetches per page before giving up - fetch_page's default. Named rather than inlined because the
+# time budget has to price a fetch before committing to it, and a cost estimate that drifts from
+# the real attempt count would silently stop bounding anything.
+ATTEMPTS = 2
+
 Fetcher = Callable[[str, "str | None"], "tuple[int, str]"]
 
 
@@ -123,6 +128,11 @@ class SearchResult:
     pages_fetched: int
     seconds: float
     failed_terms: dict[str, str] = field(default_factory=dict)
+    # True when SCRAPE_BUDGET_S stopped us early - a page we did not fetch, or a body we did not
+    # fill. The posts are real either way, so this is the only thing separating "that is all
+    # Reddit had" from "we ran out of time"; both return 200. `failed_terms` is not a substitute,
+    # it means a term errored.
+    truncated: bool = False
 
 
 @dataclass
@@ -132,6 +142,9 @@ class ThreadsResult:
     seconds: float
     missing: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
+    # As above. Deliberately NOT folded into `failed`: a thread we ran out of time for is not a
+    # thread Reddit refused, and Stage 4 treats those differently.
+    truncated: bool = False
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -352,6 +365,17 @@ def parse_thread(html: str, url: str = "") -> Thread:
 _browser_gate = threading.BoundedSemaphore(max(1, settings.max_concurrency))
 
 
+def _fetch_cost_s(attempts: int = ATTEMPTS) -> float:
+    """Worst case wall clock for one fetch_page call: every attempt times out, plus our pauses.
+
+    Callers use this to ask "is there room for a whole fetch" before starting one, rather than
+    "is the deadline already past". The difference matters: a fetch begun just under the deadline
+    overruns it by its entire cost, which is how a 200s budget turns into a 245s response. Takes
+    `attempts` because the three call paths differ - fill_bodies passes 1, the others use ATTEMPTS.
+    """
+    return attempts * (settings.fetch_timeout_ms / 1000) + (attempts - 1) * settings.retry_delay_s
+
+
 def _html_of(page) -> str:
     for attr in ("html_content", "body", "text"):
         v = getattr(page, attr, None)
@@ -366,14 +390,22 @@ def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
 
     kwargs = dict(
         headless=True,
-        disable_resources=True,
+        disable_resources=settings.block_resources,
         block_webrtc=True,
-        humanize=False,
-        os_randomize=True,
-        geoip=bool(settings.proxy),
+        # Not redundant, and not safe to drop: Scrapling's own default is retries=3, and it
+        # multiplies with fetch_page's attempts and the page loop above that - 3 x 2 x 3 = 18
+        # navigations for one search term, ~828s worst case against a 290s node timeout. The one
+        # retry that matters lives in fetch_page, where it can tell a block from a dead browser;
+        # this layer just repeats blindly. fetch_page's `except ScrapeFailed` is now the only
+        # crash retry in the stack - deleting it turns one flaky Chromium launch into a 503.
+        retries=1,
         proxy=settings.proxy,
         timeout=settings.fetch_timeout_ms,
     )
+    # Removed 2026-09-17: humanize / os_randomize / geoip. They are Camoufox-era (scrapling 0.2.x)
+    # arguments that do not exist in 0.4.15 - its msgspec validator absorbs unknown keys silently,
+    # so they read as active stealth while doing nothing at all. If Reddit starts blocking this
+    # server, do not rule them out as already tried; they were never on.
     if wait_selector:
         kwargs.update(wait_selector=wait_selector, wait_selector_state="attached")
     with _browser_gate:
@@ -384,7 +416,7 @@ def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
     return int(page.status), _html_of(page)
 
 
-def fetch_page(url: str, fetcher: Fetcher = fetch_html, wait_selector: str | None = None, attempts: int = 2) -> str:
+def fetch_page(url: str, fetcher: Fetcher = fetch_html, wait_selector: str | None = None, attempts: int = ATTEMPTS) -> str:
     """Fetch one page, retrying once when Reddit refuses us. A 404 raises ThreadMissing straight away."""
     last_err: RedditError | None = None
     for attempt in range(1, attempts + 1):
@@ -412,13 +444,25 @@ def search_term(
     time_filter: str = "all",
     include_nsfw: bool = False,
     fetcher: Fetcher = fetch_html,
-) -> tuple[list[Post], int]:
-    """Posts for one search term, following Reddit's cursor until `max_posts` or MAX_SEARCH_PAGES."""
+    deadline: float | None = None,
+) -> tuple[list[Post], int, bool]:
+    """Posts for one search term, following Reddit's cursor until `max_posts` or MAX_SEARCH_PAGES.
+
+    Returns (posts, pages_fetched, truncated). `truncated` means the budget stopped us with more
+    pages available, not that anything failed."""
     posts: list[Post] = []
     seen: set[str] = set()
     url: str | None = build_search_url(term, sort, time_filter)
     pages = 0
+    truncated = False
     while url and pages < settings.max_search_pages and len(posts) < max_posts:
+        # Page 1 is never skipped, however late we already are: returning zero posts would read
+        # downstream as "Reddit has nothing for this brand" and trigger the Tavily fallback, which
+        # is a data lie. A late answer is recoverable; a wrong one is not.
+        if pages and deadline is not None and time.time() + _fetch_cost_s() > deadline:
+            truncated = True
+            log.info("%r budget exhausted after %d page(s), returning %d post(s) early", term, pages, len(posts))
+            break
         html = fetch_page(url, fetcher=fetcher)
         pages += 1
         page = parse_search(html, term)
@@ -432,7 +476,7 @@ def search_term(
         if fresh == 0:
             break  # an empty or repeating page means the results are exhausted
         url = page.next_url
-    return posts[:max_posts], pages
+    return posts[:max_posts], pages, truncated
 
 
 def scrape_search(
@@ -451,11 +495,15 @@ def scrape_search(
         raise ValueError("request must include at least one search term (`searchTerms`)")
     full_bodies = settings.full_bodies if full_bodies is None else full_bodies
     started = time.time()
-    outcomes: dict[str, tuple[list[Post], int] | RedditError] = {}
+    # One budget for the whole call, shared by every term and then by the body-fill phase below.
+    # Terms run in parallel but queue on the browser gate, so the deadline is what stops a slow
+    # term from spending the body-fill phase's time as well as its own.
+    deadline = started + settings.scrape_budget_s
+    outcomes: dict[str, tuple[list[Post], int, bool] | RedditError] = {}
 
     def run(term: str) -> None:
         try:
-            outcomes[term] = search_term(term, max_posts, sort, time_filter, include_nsfw, fetcher)
+            outcomes[term] = search_term(term, max_posts, sort, time_filter, include_nsfw, fetcher, deadline)
         except RedditError as e:
             outcomes[term] = e
 
@@ -466,13 +514,15 @@ def scrape_search(
     seen: set[str] = set()
     pages = 0
     failed: dict[str, str] = {}
+    truncated = False
     for term in terms:
         out = outcomes[term]
         if isinstance(out, RedditError):
             failed[term] = str(out)
             continue
-        found, n = out
+        found, n, term_truncated = out
         pages += n
+        truncated = truncated or term_truncated
         for p in found:
             if p.id not in seen:
                 seen.add(p.id)
@@ -483,24 +533,43 @@ def scrape_search(
         assert isinstance(err, RedditError)
         raise err if isinstance(err, (ScrapeBlocked, ScrapeFailed)) else ScrapeFailed(str(err))
     if full_bodies and posts:
-        pages += fill_bodies(posts[: settings.max_body_fetches], fetcher, deadline=started + settings.search_budget_s)
-    return SearchResult(posts=posts, pages_fetched=pages, seconds=round(time.time() - started, 1), failed_terms=failed)
+        filled, bodies_truncated = fill_bodies(posts[: settings.max_body_fetches], fetcher, deadline=deadline)
+        pages += filled
+        truncated = truncated or bodies_truncated
+    return SearchResult(
+        posts=posts,
+        pages_fetched=pages,
+        seconds=round(time.time() - started, 1),
+        failed_terms=failed,
+        truncated=truncated,
+    )
 
 
-def fill_bodies(posts: list[Post], fetcher: Fetcher = fetch_html, deadline: float | None = None) -> int:
+def fill_bodies(posts: list[Post], fetcher: Fetcher = fetch_html, deadline: float | None = None) -> tuple[int, bool]:
     """Replace search snippets with the full post text from each thread page, in place.
 
     Search results carry no post body (only a snippet, often from a comment), while the Apify actor returned
     the full body. `Sort Reddit Results` gates and scores on brand mentions in the body and the report prompt
     quotes it, so bodies matter. Best effort: a thread that fails, or is still queued when `deadline` passes,
-    keeps its snippet, so a busy server answers inside Stage 4's timeout. Returns pages fetched."""
+    keeps its snippet, so a busy server answers inside Stage 4's timeout.
+
+    Returns (pages_fetched, truncated). `truncated` means at least one body was skipped for time -
+    invisible otherwise, since a skipped post just keeps `body_is_snippet` and downstream cannot
+    tell that apart from full bodies being switched off."""
     fetched = 0
+    truncated = False
+    # fetched/truncated are mutated from pool threads; += is not atomic under the GIL.
+    lock = threading.Lock()
 
     def run(p: Post) -> None:
-        nonlocal fetched
-        if deadline is not None and time.time() > deadline:
+        nonlocal fetched, truncated
+        # attempts=1 below, so one fetch is the whole cost of this body.
+        if deadline is not None and time.time() + _fetch_cost_s(1) > deadline:
+            with lock:
+                truncated = True
             return
-        fetched += 1
+        with lock:
+            fetched += 1
         try:
             t = parse_thread(fetch_page(thread_url(p.permalink), fetcher=fetcher, wait_selector="shreddit-post", attempts=1))
         except (RedditError, ValueError) as e:
@@ -514,7 +583,9 @@ def fill_bodies(posts: list[Post], fetcher: Fetcher = fetch_html, deadline: floa
 
     with ThreadPoolExecutor(max_workers=max(1, settings.max_concurrency)) as pool:
         list(pool.map(run, posts))
-    return fetched
+    if truncated:
+        log.info("body fill stopped at the budget after %d of %d post(s)", fetched, len(posts))
+    return fetched, truncated
 
 
 def scrape_threads(
@@ -538,9 +609,20 @@ def scrape_threads(
         raise ValueError("request must include at least one reddit thread link (`startUrls`)")
     canonical = canonical[: settings.max_threads]
     started = time.time()
+    # Same budget as the search path. Up to MAX_THREADS urls queue on a gate of MAX_CONCURRENCY, so
+    # without this the last wave starts long after Stage 4's 250s node timeout has already given up.
+    deadline = started + settings.scrape_budget_s
     outcomes: dict[str, Thread | RedditError] = {}
+    skipped: list[str] = []
+    lock = threading.Lock()
 
     def run(u: str) -> None:
+        if time.time() + _fetch_cost_s(ATTEMPTS) > deadline:
+            # Not an error: we never asked Reddit. Recording it in `failed` would make a clock
+            # decision look like a vendor refusal to Stage 4.
+            with lock:
+                skipped.append(u)
+            return
         try:
             outcomes[u] = parse_thread(fetch_page(u, fetcher=fetcher, wait_selector="shreddit-post"), u)
         except RedditError as e:
@@ -554,7 +636,9 @@ def scrape_threads(
     failed: dict[str, str] = {}
     budget = max_comments_total if max_comments_total is not None else 10**9
     for u in canonical:
-        out = outcomes[u]
+        out = outcomes.get(u)
+        if out is None:  # never attempted - the budget ran out before this one reached the gate
+            continue
         if isinstance(out, ThreadMissing):
             missing.append(u)
             continue
@@ -569,10 +653,14 @@ def scrape_threads(
         err = outcomes[next(iter(failed))]
         assert isinstance(err, RedditError)
         raise err
+    if skipped:
+        log.info("budget exhausted, %d of %d thread(s) never attempted", len(skipped), len(canonical))
     return ThreadsResult(
         threads=threads,
-        pages_fetched=len(canonical),
+        # Threads we never attempted are not pages we fetched.
+        pages_fetched=len(canonical) - len(skipped),
         seconds=round(time.time() - started, 1),
         missing=missing,
         failed=failed,
+        truncated=bool(skipped),
     )

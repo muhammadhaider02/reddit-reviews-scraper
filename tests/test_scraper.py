@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from conftest import FakeReddit, fixture, set_frozen
 
@@ -180,9 +182,31 @@ def test_search_fills_full_bodies_from_thread_pages():
 def test_body_fetches_stop_at_the_deadline():
     site = search_site()
     posts = parse_search(fixture("search_gymshark_reviews.html")).posts
-    assert scraper.fill_bodies(posts, site, deadline=0) == 0
+    assert scraper.fill_bodies(posts, site, deadline=0) == (0, True)
     assert all(p.body_is_snippet for p in posts)
     assert site.calls == []
+
+
+def test_body_fetches_reserve_room_rather_than_racing_the_deadline():
+    """A deadline still in the future but too close to fit a whole fetch must stop us.
+
+    The old check was `time.time() > deadline`, which let a body fetch start at t=199 and run its
+    full cost past the caller's own timeout. Reserving the cost up front is what bounds the call.
+    """
+    site = search_site()
+    posts = parse_search(fixture("search_gymshark_reviews.html")).posts
+    # Comfortably in the future, but less than one fetch's worst case away.
+    deadline = time.time() + scraper._fetch_cost_s(1) - 1
+    assert scraper.fill_bodies(posts, site, deadline=deadline) == (0, True)
+    assert site.calls == []
+
+
+def test_a_healthy_body_fill_is_not_flagged_as_truncated():
+    site = search_site()
+    posts = parse_search(fixture("search_gymshark_reviews.html")).posts
+    fetched, truncated = scraper.fill_bodies(posts, site, deadline=time.time() + 10_000)
+    assert fetched == len(posts)
+    assert truncated is False
 
 
 def test_body_fetch_failure_keeps_snippet():
@@ -265,6 +289,121 @@ def test_threads_partial_block_keeps_the_rest():
 def test_threads_require_a_thread_link():
     with pytest.raises(ValueError):
         scrape_threads(["https://example.com"], fetcher=FakeReddit())
+
+
+# --------------------------------------------------------------------------- time budget
+
+
+def test_search_truncates_when_another_page_will_not_fit(budget):
+    budget(1)  # far below the ~92s one page is allowed to cost
+    site = search_site()
+
+    # max_posts=10 needs a second page: page 1 carries 7. The budget is what stops it, not the cap.
+    res = scrape_search(["Gymshark reviews"], max_posts=10, fetcher=site, full_bodies=False)
+
+    # Page 2 is never even attempted, and what page 1 found comes back as a normal result.
+    assert len(site.calls) == 1
+    assert res.pages_fetched == 1
+    assert res.posts
+    assert res.truncated is True
+    assert res.failed_terms == {}, "running out of time is not a term failing"
+
+
+def test_search_budget_never_skips_the_first_page(budget):
+    budget(0)  # no budget at all
+    site = search_site()
+
+    # Returning zero posts would read to Stage 4 as "Reddit has nothing for this brand" and fire
+    # the Tavily fallback. Page 1 is always attempted, however late we are.
+    res = scrape_search(["Gymshark reviews"], max_posts=10, fetcher=site, full_bodies=False)
+    assert len(site.calls) == 1
+    assert len(res.posts) == 7
+    assert res.truncated is True
+
+
+def test_search_is_not_truncated_on_a_normal_run():
+    site = search_site()
+    res = scrape_search(["Gymshark reviews"], max_posts=10, fetcher=site, full_bodies=False)
+    assert res.pages_fetched == 2
+    assert res.truncated is False, "a healthy search must never be flagged as truncated"
+
+
+def test_threads_truncate_without_looking_like_a_vendor_failure(budget):
+    budget(0)
+    site = FakeReddit({TEXT_THREAD: (200, fixture("thread_text_post.html")), IMAGE_THREAD: (200, fixture("thread_image_post.html"))})
+
+    res = scrape_threads([TEXT_THREAD, IMAGE_THREAD], fetcher=site)
+
+    assert site.calls == [], "nothing should be fetched once the budget is gone"
+    assert res.truncated is True
+    # The distinction that matters downstream: a clock decision is not Reddit refusing us, so it
+    # must not land in `failed` and must not raise ScrapeBlocked.
+    assert res.failed == {}
+    assert res.missing == []
+    assert res.pages_fetched == 0
+
+
+def test_threads_are_not_truncated_on_a_normal_run():
+    site = FakeReddit({TEXT_THREAD: (200, fixture("thread_text_post.html")), IMAGE_THREAD: (200, fixture("thread_image_post.html"))})
+    res = scrape_threads([TEXT_THREAD, IMAGE_THREAD], fetcher=site)
+    assert len(res.threads) == 2
+    assert res.truncated is False
+
+
+# --------------------------------------------------------------------------- browser contract
+
+
+def test_fetch_html_pins_the_scrapling_kwargs(monkeypatch):
+    import scrapling.fetchers as fetchers
+
+    seen = {}
+
+    class FakePage:
+        status = 200
+        html_content = "<html></html>"
+
+    class FakeFetcher:
+        @classmethod
+        def fetch(cls, url, **kwargs):
+            seen.update(kwargs)
+            return FakePage()
+
+    monkeypatch.setattr(fetchers, "StealthyFetcher", FakeFetcher)
+    status, _ = scraper.fetch_html("https://www.reddit.com/r/Gymshark/comments/1st816z/")
+
+    assert status == 200
+    # Scrapling's own default is 3, and it multiplies with every retry layer above it.
+    assert seen["retries"] == 1
+    # Camoufox-era names that scrapling 0.4.x swallows silently - they must not drift back in.
+    assert not {"humanize", "os_randomize", "geoip"} & set(seen)
+    assert seen["block_webrtc"] is True, "this one is real, unlike the three above"
+    assert seen["disable_resources"] is settings.block_resources
+
+
+def test_fetch_html_passes_the_wait_selector_only_when_asked(monkeypatch):
+    import scrapling.fetchers as fetchers
+
+    seen = {}
+
+    class FakePage:
+        status = 200
+        html_content = "<html></html>"
+
+    class FakeFetcher:
+        @classmethod
+        def fetch(cls, url, **kwargs):
+            seen.clear()
+            seen.update(kwargs)
+            return FakePage()
+
+    monkeypatch.setattr(fetchers, "StealthyFetcher", FakeFetcher)
+
+    scraper.fetch_html("https://www.reddit.com/x")
+    assert "wait_selector" not in seen
+
+    scraper.fetch_html("https://www.reddit.com/x", "shreddit-post")
+    assert seen["wait_selector"] == "shreddit-post"
+    assert seen["wait_selector_state"] == "attached"
 
 
 @pytest.mark.live

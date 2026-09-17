@@ -42,3 +42,19 @@ def fast_settings():
     set_frozen(settings, "retry_delay_s", 0)
     yield
     set_frozen(settings, "retry_delay_s", before)
+
+
+@pytest.fixture
+def budget():
+    """Override SCRAPE_BUDGET_S on the frozen settings singleton, restoring it afterwards.
+
+    The budget is driven directly rather than by faking the clock: the scrape reserves a whole
+    fetch's worst case (ATTEMPTS x FETCH_TIMEOUT_MS + RETRY_DELAY_S, ~92s) before committing to
+    one, so shrinking the budget below that reservation exercises the real code path without any
+    test needing to spend or simulate wall-clock time.
+    """
+    from reddit_reviews.config import settings
+
+    before = settings.scrape_budget_s
+    yield lambda seconds: set_frozen(settings, "scrape_budget_s", seconds)
+    set_frozen(settings, "scrape_budget_s", before)

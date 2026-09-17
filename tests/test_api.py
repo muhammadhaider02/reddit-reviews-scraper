@@ -102,6 +102,36 @@ def test_stage4_comments_body_verbatim(client, monkeypatch):
     assert items[0]["dataType"] == "post" and items[1]["postId"] == items[0]["id"]
 
 
+def test_search_truncation_is_flagged_in_the_headers(client, monkeypatch):
+    """A budget-truncated call is a 200 with real posts, so the header is the only way the caller
+    can tell it apart from 'that is everything Reddit had'."""
+    import dataclasses
+
+    monkeypatch.setattr(api, "scrape_search", lambda *a, **k: dataclasses.replace(canned_search(), truncated=True))
+    r = client.post("/reddit", json={"searchTerms": ["Gymshark"]})
+    assert r.status_code == 200
+    assert len(r.json()) == 7, "truncated still returns the posts it did collect"
+    assert r.headers["X-Truncated"] == "true"
+    # It is not a term failure, so the vendor-failure path must stay untouched.
+    assert r.headers["X-Terms-Failed"] == "0"
+
+
+def test_threads_truncation_is_flagged_in_the_headers(client, monkeypatch):
+    import dataclasses
+
+    monkeypatch.setattr(api, "scrape_threads", lambda *a, **k: dataclasses.replace(canned_threads(), truncated=True))
+    r = client.post("/reddit", json={"startUrls": [{"url": "https://www.reddit.com/r/Gymshark/comments/1st816z/"}]})
+    assert r.status_code == 200
+    assert r.headers["X-Truncated"] == "true"
+    assert r.headers["X-Threads-Failed"] == "0"
+
+
+def test_a_healthy_call_is_not_flagged_as_truncated(client, monkeypatch):
+    monkeypatch.setattr(api, "scrape_search", canned_search)
+    r = client.post("/reddit", json={"searchTerms": ["Gymshark"]})
+    assert r.headers["X-Truncated"] == "false"
+
+
 def test_empty_result_is_200_empty_array(client, monkeypatch):
     monkeypatch.setattr(api, "scrape_search", lambda *a, **k: SearchResult(posts=[], pages_fetched=3, seconds=1.0))
     r = client.post("/reddit", json={"searchTerms": ["nothing"]})

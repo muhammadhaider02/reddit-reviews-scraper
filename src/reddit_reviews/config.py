@@ -29,8 +29,13 @@ class Settings:
     proxy: str | None = os.environ.get("SCRAPER_PROXY", "").strip() or None
     # Browser fetches allowed at once, across ALL requests. Stage 4 sends 3 search terms, then up to 8 threads.
     max_concurrency: int = _env_int("MAX_CONCURRENCY", 3)
-    # Per-page browser timeout. Stage 4 allows 280s for the search call and 240s for the comments call.
+    # Per-page browser timeout. Stage 4 allows 290s for the search call and 250s for the comments call
+    # (read from the live workflow's node timeouts, u3698BQra0i9oK4b).
     fetch_timeout_ms: int = _env_int("FETCH_TIMEOUT_MS", 45_000)
+    # We only read the server-rendered HTML, so images, fonts, CSS and media are pure memory and
+    # bandwidth cost in the browser. Blocking them is the single biggest memory lever we have.
+    # Flip to false if Reddit starts serving the stripped page a challenge.
+    block_resources: bool = _env_bool("BLOCK_RESOURCES", True)
     # Reddit search returns about 7 posts per page. Hard cap on pages followed per search term.
     max_search_pages: int = _env_int("MAX_SEARCH_PAGES", 3)
     # Search results carry only a snippet. When on, each found post's thread page is read for its full body,
@@ -38,9 +43,14 @@ class Settings:
     full_bodies: bool = _env_bool("FULL_BODIES", True)
     # Hard cap on thread pages read for bodies per search call.
     max_body_fetches: int = _env_int("MAX_BODY_FETCHES", 30)
-    # Seconds into a search call after which no NEW body fetch starts (posts keep their snippet). Stage 4 gives
-    # the call 280s; one brand alone takes ~95s, but overlapping runs share the browser gate and slow down.
-    search_budget_s: int = _env_int("SEARCH_BUDGET_S", 200)
+    # Total wall-clock budget for one call, search or comments. Nothing cancels a request once it
+    # starts - Starlette does not cancel handlers on client disconnect, and the browser runs in a
+    # thread that cannot be cancelled - so a caller that gives up does NOT free the browser. This is
+    # what frees it: no new page, body or thread is started that cannot finish inside the budget,
+    # and the call returns what it already has with `truncated` set. One brand alone takes ~95s, but
+    # overlapping runs share the browser gate and slow down. Must stay under BOTH Stage 4 node
+    # timeouts (search 290s, comments 250s), and under docker-compose.yml's stop_grace_period.
+    scrape_budget_s: int = _env_int("SCRAPE_BUDGET_S", 200)
     # Hard cap on thread URLs read per call, whatever the caller sends.
     max_threads: int = _env_int("MAX_THREADS", 10)
     # Pause before retrying a blocked page, seconds.

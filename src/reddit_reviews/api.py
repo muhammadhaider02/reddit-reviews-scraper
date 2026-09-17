@@ -31,7 +31,7 @@ from .scraper import RedditError, scrape_search, scrape_threads
 
 log = logging.getLogger("reddit_reviews.api")
 
-counters = {"requests": 0, "search": 0, "threads": 0, "ok": 0, "empty": 0, "partial": 0, "blocked": 0, "failed": 0, "bad_request": 0, "in_flight": 0}
+counters = {"requests": 0, "search": 0, "threads": 0, "ok": 0, "empty": 0, "partial": 0, "blocked": 0, "failed": 0, "bad_request": 0, "truncated": 0, "in_flight": 0}
 
 
 @asynccontextmanager
@@ -128,6 +128,7 @@ async def reddit(req: RedditRequest):
                 "X-Pages-Fetched": str(res.pages_fetched),
                 "X-Threads-Missing": str(len(res.missing)),
                 "X-Threads-Failed": str(len(res.failed)),
+                "X-Truncated": "true" if res.truncated else "false",
             }
             summary = f"threads={len(res.threads)} comments={len(items) - len(res.threads)} missing={len(res.missing)} failed={len(res.failed)}"
             seconds = res.seconds
@@ -147,6 +148,7 @@ async def reddit(req: RedditRequest):
                 "X-Scrape-Seconds": str(res.seconds),
                 "X-Pages-Fetched": str(res.pages_fetched),
                 "X-Terms-Failed": str(len(res.failed_terms)),
+                "X-Truncated": "true" if res.truncated else "false",
             }
             summary = f"terms={len(req.search_terms)} posts={len(items)} failed_terms={len(res.failed_terms)}"
             seconds = res.seconds
@@ -165,6 +167,10 @@ async def reddit(req: RedditRequest):
         counters["in_flight"] -= 1
 
     counters["partial" if partial else "ok" if items else "empty"] += 1
+    # A truncated call is a 200 like any other, so without this counter it is invisible to anything
+    # but a per-request header read. A rising number means the budget is biting.
+    if res.truncated:
+        counters["truncated"] += 1
     log.info("ok %s %s %.1fs", mode, summary, seconds)
     return JSONResponse(content=items, headers=headers)
 
