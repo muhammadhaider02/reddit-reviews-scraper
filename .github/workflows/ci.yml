@@ -24,10 +24,14 @@ jobs:
   docker-image:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      API_TOKEN: ci-smoke-token
     steps:
       - uses: actions/checkout@v4
+
+      # Minted per run rather than written down. The container that trusts it is built and
+      # destroyed inside this job, so there is nothing to store and nothing to rotate - and
+      # no credential-shaped literal in the repo for a real one to hide behind later.
+      - name: Mint a throwaway token for this run
+        run: echo "API_TOKEN=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
 
       - name: Build image
         run: docker build -t reddit-reviews:ci .
