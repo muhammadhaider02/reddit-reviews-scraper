@@ -55,14 +55,17 @@ def _log_egress() -> None:
         log.warning("no SCRAPER_PROXY set - fetches leave from this host's own IP, which Reddit blocks")
         return
     try:
-        server = proxy["server"] if isinstance(proxy, dict) else proxy
-        handler = urllib.request.ProxyHandler({"http": server, "https": server})
-        if isinstance(proxy, dict) and proxy.get("username"):
-            mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-            mgr.add_password(None, server, proxy["username"], proxy["password"])
-            opener = urllib.request.build_opener(handler, urllib.request.ProxyBasicAuthHandler(mgr))
+        if isinstance(proxy, dict):
+            # Credentials go inline here rather than through ProxyBasicAuthHandler, which does not
+            # authenticate a CONNECT tunnel and answers 407. This URL is never logged.
+            from urllib.parse import quote
+
+            scheme, _, hostport = proxy["server"].partition("://")
+            creds = f"{quote(proxy['username'], safe='')}:{quote(proxy['password'], safe='')}"
+            server = f"{scheme}://{creds}@{hostport}"
         else:
-            opener = urllib.request.build_opener(handler)
+            server = proxy
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": server, "https": server}))
         with opener.open("https://ip.decodo.com/json", timeout=20) as r:
             ip = (json.loads(r.read()).get("proxy") or {}).get("ip")
         log.info("proxy is attached: fetches leave from %s (sticky port %d)", ip, STICKY_PORT_RANGE[0])
