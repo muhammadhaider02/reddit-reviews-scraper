@@ -588,43 +588,6 @@ def search_term(
     return posts[:max_posts], pages, truncated
 
 
-def search_route() -> str:
-    """Which index search reads. Falls back to the browser if the mobile route is switched off, so
-    the two flags cannot contradict each other into a service that answers nothing."""
-    route = (settings.search_route or "web").strip().lower()
-    if route == "mobile" and not mobile.available():
-        log.warning("SEARCH_ROUTE=mobile but MOBILE_ENABLED is false - using the browser")
-        return "web"
-    return "mobile" if route == "mobile" else "web"
-
-
-def search_term_mobile(
-    term: str, max_posts: int = 10, sort: str = "relevance", time_filter: str = "all", include_nsfw: bool = False
-) -> tuple[list[Post], int, bool]:
-    """One term through the app's search index. Same return shape as search_term().
-
-    No cursor and no page loop: Reddit's `limit` covers the whole term in one call, so there is
-    nothing to paginate and nothing to budget against. Bodies arrive with the results, which is why
-    the caller skips the body-fill phase entirely on this route.
-
-    Deliberately no browser fallback. A fallback would quietly put the proxy back in the path and
-    contaminate the very comparison this route exists to make - and it would mean a run labelled
-    "mobile" was partly web. A failure here is a failure.
-    """
-    sort = sort.lower() if sort and sort.lower() in SORTS else "relevance"
-    time_filter = time_filter.lower() if time_filter and time_filter.lower() in TIMES else "all"
-    try:
-        raw = mobile.search(term, limit=max_posts, sort=sort, time_filter=time_filter)
-    except mobile.MobileBlocked as e:
-        raise ScrapeBlocked(f"reddit refused the app search for {term!r}: {e}") from e
-    except mobile.MobileError as e:
-        raise ScrapeFailed(f"app search failed for {term!r}: {e}") from e
-    posts = [post_from_raw(r, term) for r in raw]
-    if not include_nsfw:
-        posts = [p for p in posts if not p.nsfw]
-    # One call, so never truncated by the clock; `1` is that call, counted like a page for telemetry.
-    return posts[:max_posts], 1, False
-
 
 def scrape_search(
     terms: list[str],
@@ -648,14 +611,9 @@ def scrape_search(
     deadline = started + settings.scrape_budget_s
     outcomes: dict[str, tuple[list[Post], int, bool] | RedditError] = {}
 
-    route = search_route()
-
     def run(term: str) -> None:
         try:
-            if route == "mobile":
-                outcomes[term] = search_term_mobile(term, max_posts, sort, time_filter, include_nsfw)
-            else:
-                outcomes[term] = search_term(term, max_posts, sort, time_filter, include_nsfw, fetcher, deadline)
+            outcomes[term] = search_term(term, max_posts, sort, time_filter, include_nsfw, fetcher, deadline)
         except RedditError as e:
             outcomes[term] = e
 
@@ -673,10 +631,7 @@ def scrape_search(
             failed[term] = str(out)
             continue
         found, n, term_truncated = out
-        # On the mobile route `n` is an API call, not a proxied browser page. Counting it in
-        # pages_fetched would make a free call look like a ~1 MB one on the very dashboard we use to
-        # read the bandwidth bill.
-        pages += 0 if route == "mobile" else n
+        pages += n
         truncated = truncated or term_truncated
         for p in found:
             if p.id not in seen:
@@ -688,12 +643,7 @@ def scrape_search(
         assert isinstance(err, RedditError)
         raise err if isinstance(err, (ScrapeBlocked, ScrapeFailed)) else ScrapeFailed(str(err))
     mobile_posts = 0
-    if route == "mobile":
-        # Nothing to fill: Reddit's search response carries `selftext`, so post_from_raw already set
-        # the full body and cleared body_is_snippet. Running the fill anyway would spend an /api/info
-        # call re-fetching posts we just received in full.
-        mobile_posts = len(posts)
-    elif full_bodies and posts:
+    if full_bodies and posts:
         wanted = posts[: settings.max_body_fetches]
         # The mobile route fills every body in one call, so try it before spending a browser page on
         # any of them. The fallback is all-or-nothing on purpose: `None` means the route itself was

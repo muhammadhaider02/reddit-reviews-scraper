@@ -8,10 +8,12 @@ Reddit's *web* search (`/svc/shreddit/search/`, what the browser reads) and the 
 in its top-10 - and across 103 brands the two routes agreed on well under half the posts. So the app
 cannot serve search without changing what Stage 4 reads.
 
-`search()` therefore exists but is OFF by default, behind SEARCH_ROUTE=mobile. It is there to
-measure that difference on real brands rather than argue about it, and because it costs nothing at
-all beyond the proxy bytes below: no browser, no body-fill phase, bodies included in the response.
-It is not a cheaper way to get the same results; it is a different result set.
+A full-mobile search route was built behind a flag and measured over the same 103 brands, hours
+apart: 7.2% post overlap with the web index, the same share of posts naming the brand, and less
+than half the usable comment material (606 vs 1,388 comments naming the brand), because the app
+index finds threads that merely mention a brand while the web index finds threads ABOUT it. It
+was removed on 19 Sep 2026: Stage 4 quotes comments to founders, and the web search now costs
+about half a cent per brand. This module reads by id only.
 
 Fetching a post or its comments BY ID involves no ranking at all, and there the app API is
 strictly better: one `/api/info` call returned all 30 browser-found ids with full `selftext` in
@@ -401,31 +403,6 @@ def info(fullnames: list[str]) -> dict[str, dict]:
                     out[name] = data
     return out
 
-
-def search(term: str, limit: int = 10, sort: str = "relevance", time_filter: str = "all") -> list[dict]:
-    """Search posts through the app API. Returns raw `t3` post dicts, bodies included.
-
-    Only reachable when SEARCH_ROUTE=mobile. Read the module docstring first: this is a different
-    index from the web search, not a cheaper route to the same answer.
-
-    One call covers the whole term - Reddit caps `limit` at 100 and Stage 4 asks for 10 - so there is
-    no cursor to follow and no per-page cost. The bodies arrive with the results, which is why this
-    route needs no body-fill phase at all.
-
-    Raises MobileError on a short listing. Reddit's documented soft block is a 200 carrying almost
-    nothing, and treating that as "the brand has no discussion" would silently empty a report.
-    """
-    payload = None
-    with _pool.lease() as device:
-        payload = device.get("/search", {"q": term, "sort": sort, "t": time_filter,
-                                         "limit": max(1, min(int(limit), 100)), "type": "link"})
-    if not isinstance(payload, dict):
-        raise MobileError("/search returned an unexpected shape")
-    children = payload.get("data", {}).get("children", [])
-    posts = [c["data"] for c in children if c.get("kind") == "t3" and c.get("data")]
-    if limit >= 10 and len(posts) < 3:
-        raise MobileError(f"short listing for {term!r} ({len(posts)} posts) - treating as a soft block")
-    return posts
 
 
 def comments(post_id: str, limit: int = 20, depth: int = 2, sort: str = "top") -> tuple[dict, list[dict]]:
