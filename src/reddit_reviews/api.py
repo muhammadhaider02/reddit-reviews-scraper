@@ -67,8 +67,10 @@ def _log_egress() -> None:
         else:
             server = proxy
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": server, "https": server}))
-        with opener.open("https://ip.decodo.com/json", timeout=20) as r:
-            ip = (json.loads(r.read()).get("proxy") or {}).get("ip")
+        # Vendor-neutral on purpose: this has to keep working whoever SCRAPER_PROXY points at, and a
+        # probe hosted by one proxy vendor is a dependency on that vendor outliving our contract.
+        with opener.open("https://api.ipify.org?format=json", timeout=20) as r:
+            ip = json.loads(r.read()).get("ip")
         log.info("proxy is attached: fetches leave from %s (sticky port %d)", ip, STICKY_PORT_RANGE[0])
     except Exception as e:  # noqa: BLE001 - a failed probe must never stop the service booting
         log.warning("could not confirm the proxy egress IP (%s: %s) - scrapes will still try it", type(e).__name__, e)
