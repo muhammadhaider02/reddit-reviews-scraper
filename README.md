@@ -20,7 +20,13 @@ Self-hosted Reddit post and comment scraper with an HTTP API.
 
 This repo is a standalone Reddit collection service, the sibling of `trustpilot-reviews`. Given search terms it reads Reddit's search pages with a stealth browser and returns the matching posts; given thread links it returns each thread's post and comments. It serves the result over a small authenticated HTTP API that automation workflows call like any other data service.
 
-A real browser is required. Reddit's JSON endpoints (`/search.json`, `/comments/<id>.json`) answer `403 blocked by network security` to plain HTTP clients and to the stealth browser alike. The regular web pages are server-rendered with the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`), which is what this service reads.
+Two routes, split by whether ranking is involved.
+
+**Search needs the browser.** Reddit's public JSON endpoints (`/search.json`, `/comments/<id>.json`) answer `403 blocked by network security` to plain HTTP clients and to the stealth browser alike. The regular web pages are server-rendered with the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`), which is what this service reads, through a residential proxy.
+
+**Everything fetched by id does not.** Reddit's own Android app reads through an anonymous OAuth token that is gated on client identity rather than on IP, so it answers a datacenter host directly, with no proxy and no browser. Post bodies and comment trees come from there (`mobile.py`), which is where ~95% of the proxy bandwidth and ~80% of the wall clock went: measured on one brand, 92.1 MB and 185s became 4.8 MB and 37s, for the same posts and comments.
+
+The line between them is not a preference. The app's search is a *different index*: measured 18 Sep 2026 across three brands, its top-100 held 2 of the 30 posts the web search put in its top-10, so serving search from it would change what callers read. `MOBILE_ENABLED=false` falls everything back to the browser, which still works and simply costs what it used to.
 
 ## Quickstart
 
@@ -53,7 +59,9 @@ uv run reddit-reviews thread https://www.reddit.com/r/Gymshark/comments/1vf53rw/
 
 All configuration is environment variables in `.env`. **`.env.example` is the canonical list.** Copy it and fill it in; every variable is documented there alongside the measurement its default is based on.
 
-`API_TOKEN` is the bearer token callers must send, and is required in production. `SCRAPER_PROXY` is worth setting early: Reddit blocks by IP, and a datacenter address will likely need a residential proxy. The rest tune the browser: concurrency, per-page timeout, page and thread caps, resource blocking and full-body fetching.
+`API_TOKEN` is the bearer token callers must send, and is required in production. `SCRAPER_PROXY` is worth setting early: Reddit blocks by IP, and a datacenter address will need a residential proxy for the search half. The rest tune the browser: concurrency, per-page timeout, page and thread caps, resource blocking and full-body fetching.
+
+`MOBILE_ENABLED` (default on) is the kill switch for the id-fetching route. Turn it off if Reddit closes that door; the service keeps working on the browser alone at roughly 20x the bandwidth. `GET /health` reports the route's own counters under `mobile`, and `X-Mobile-Posts` / `X-Mobile-Threads` say per call how much of the work it took. Those counters are the only warning available, because the route fails soft by design: a failure falls back to the browser and is logged, not surfaced as an error.
 
 `SCRAPE_BUDGET_S` bounds a single call's wall clock. Past it the service returns the posts, bodies and threads it has already collected and sets an `X-Truncated` response header, rather than running on past the caller's own timeout holding a browser nobody is waiting for.
 
