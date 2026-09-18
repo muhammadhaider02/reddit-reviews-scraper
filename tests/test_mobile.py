@@ -528,3 +528,89 @@ def test_comments_accepts_a_fullname_or_a_bare_id(monkeypatch):
     mobile.comments("t3_1st816z")
     mobile.comments("1st816z")
     assert seen == ["/comments/1st816z", "/comments/1st816z"]
+
+
+# --------------------------------------------------------------------------- SEARCH_ROUTE
+
+
+@pytest.fixture
+def route():
+    before = settings.search_route
+    yield lambda r: set_frozen(settings, "search_route", r)
+    set_frozen(settings, "search_route", before)
+
+
+def test_the_web_route_is_the_default(route):
+    assert scraper.search_route() == "web"
+
+
+def test_the_mobile_route_needs_the_mobile_flag(route, mobile_on):
+    route("mobile")
+    assert scraper.search_route() == "mobile"
+
+
+def test_mobile_search_falls_back_to_web_when_the_route_is_switched_off(route):
+    """MOBILE_ENABLED=false and SEARCH_ROUTE=mobile must not combine into a service that answers
+    nothing - the two flags cannot be allowed to contradict each other."""
+    route("mobile")  # mobile_on NOT taken, so MOBILE_ENABLED is false
+    assert scraper.search_route() == "web"
+
+
+def test_mobile_search_spends_no_browser_page_and_needs_no_body_fill(route, mobile_on, monkeypatch):
+    route("mobile")
+    reddit = FakeReddit({})
+    monkeypatch.setattr(mobile, "search", lambda term, **kw: [{**RAW_POST, "name": f"t3_{term[:4]}"}])
+
+    def never(ids):
+        raise AssertionError("the search response already carries selftext; /api/info is waste here")
+
+    monkeypatch.setattr(mobile, "info", never)
+    res = scrape_search(["gymshark reviews"], max_posts=10, fetcher=reddit, full_bodies=True)
+
+    assert reddit.calls == [], "not one proxied page"
+    assert res.pages_fetched == 0, "an API call is not a proxied browser page"
+    assert res.posts and all(not p.body_is_snippet for p in res.posts)
+    assert res.posts[0].body == "I bought three and two shrank."
+    assert res.mobile_posts == len(res.posts)
+
+
+def test_mobile_search_drops_nsfw_unless_asked(route, mobile_on, monkeypatch):
+    route("mobile")
+    monkeypatch.setattr(mobile, "search", lambda term, **kw: [
+        {**RAW_POST, "name": "t3_clean", "over_18": False},
+        {**RAW_POST, "name": "t3_nsfw", "over_18": True},
+    ])
+    clean = scrape_search(["x"], fetcher=FakeReddit({}))
+    assert [p.id for p in clean.posts] == ["t3_clean"]
+    both = scrape_search(["x"], include_nsfw=True, fetcher=FakeReddit({}))
+    assert len(both.posts) == 2
+
+
+def test_a_short_listing_is_a_soft_block_not_an_empty_brand(monkeypatch):
+    """Reddit's documented soft block is a 200 carrying almost nothing. Reading that as 'no
+    discussion exists' would silently empty a report rather than raise."""
+    monkeypatch.setattr(mobile.Device, "get", lambda self, path, params: {
+        "data": {"children": [{"kind": "t3", "data": RAW_POST}]}})
+    with pytest.raises(mobile.MobileError, match="short listing"):
+        mobile.search("gymshark reviews", limit=10)
+
+
+def test_a_short_listing_is_fine_when_we_only_asked_for_a_few(monkeypatch):
+    monkeypatch.setattr(mobile.Device, "get", lambda self, path, params: {
+        "data": {"children": [{"kind": "t3", "data": RAW_POST}]}})
+    assert len(mobile.search("gymshark reviews", limit=3)) == 1
+
+
+def test_mobile_search_never_silently_falls_back_to_the_browser(route, mobile_on, monkeypatch):
+    """A fallback would put the proxy back in the path and make a run labelled 'mobile' partly web,
+    contaminating the comparison this route exists to make."""
+    route("mobile")
+    reddit = FakeReddit(default=(200, fixture("search_gymshark_reviews.html")))
+
+    def boom(term, **kw):
+        raise mobile.MobileError("down")
+
+    monkeypatch.setattr(mobile, "search", boom)
+    with pytest.raises(scraper.ScrapeFailed):
+        scrape_search(["gymshark reviews"], fetcher=reddit)
+    assert reddit.calls == []

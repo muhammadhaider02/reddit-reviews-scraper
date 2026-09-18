@@ -194,6 +194,7 @@ async def reddit(req: RedditRequest):
                 "X-Terms-Failed": str(len(res.failed_terms)),
                 "X-Truncated": "true" if res.truncated else "false",
                 "X-Mobile-Posts": str(res.mobile_posts),
+                "X-Search-Route": settings.search_route,
             }
             summary = f"terms={len(req.search_terms)} posts={len(items)} failed_terms={len(res.failed_terms)}"
             seconds = res.seconds
@@ -228,6 +229,7 @@ async def health():
         "auth": bool(settings.api_token),
         "proxy": bool(settings.proxy),
         "max_concurrency": settings.max_concurrency,
+        "search_route": settings.search_route,
         # The mobile route is an optimisation in front of a working browser path, so its failures are
         # logged and swallowed rather than surfaced as errors. These counters are the only way to see
         # it stop working: `blocked` climbing, or `calls` flat while requests keep arriving, means

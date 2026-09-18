@@ -66,6 +66,12 @@ class Settings:
     # search put in its top-10. See mobile.py. Turning this off falls the whole service back to the
     # browser, which still works - it just costs ~11x the proxy bandwidth.
     mobile_enabled: bool = _env_bool("MOBILE_ENABLED", True)
+    # Which index SEARCH reads. "web" is the browser through the proxy, and is what Stage 4 has
+    # always read. "mobile" is the app's own search: free, no proxy, no browser, bodies included -
+    # but a DIFFERENT INDEX, not a cheaper route to the same answer. Measured across three brands,
+    # the app's top-100 held 2 of the 30 posts the web search ranked top-10. Switching this changes
+    # what founders read, so it is a content decision, not a cost one. Requires MOBILE_ENABLED.
+    search_route: str = (os.environ.get("SEARCH_ROUTE", "web").strip().lower() or "web")
     # Devices (fake phones) that may be in flight at once. One call leases one device for all of its
     # sub-requests, so this caps concurrent CALLS on this route, not requests.
     mobile_devices: int = _env_int("MOBILE_DEVICES", 3)
