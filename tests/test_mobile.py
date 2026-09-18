@@ -341,7 +341,7 @@ def test_the_mint_sends_exactly_what_the_android_app_sends(monkeypatch):
         seen["body"] = json.loads(req.data)
         return _token_response()
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     d.mint()
 
@@ -367,7 +367,7 @@ def test_a_request_reuses_the_identity_the_token_was_minted_under(monkeypatch):
             return _token_response()
         return _Resp(json.dumps({"data": {"children": []}}).encode(), {"x-ratelimit-remaining": "98.0"})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     d.get("/api/info", {"id": "t3_x"})
 
@@ -389,7 +389,7 @@ def test_gzip_is_decoded_and_the_wire_bytes_are_what_we_count(monkeypatch):
             return _token_response()
         return _Resp(payload, {}, gzipped=True)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     d.mint()  # minted first, so the baseline below charges only the call under test
     before = mobile.counters["bytes"]
@@ -415,7 +415,7 @@ def test_a_403_with_a_back_off_header_is_a_slow_down_and_is_retried(monkeypatch)
             raise seq.pop(0)
         return _Resp(json.dumps({"ok": 1}).encode(), {})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     assert d.get("/api/info", {"id": "t3_x"}) == {"ok": 1}
     assert d.retired is False, "a rate limit must not retire the device"
@@ -430,7 +430,7 @@ def test_a_403_without_one_retires_the_device_instead_of_hammering_it(monkeypatc
             return _token_response()
         raise _http_error(403, {}, body)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     with pytest.raises(mobile.MobileBlocked):
         d.get("/api/info", {"id": "t3_x"})
@@ -451,7 +451,7 @@ def test_an_expired_token_is_reminted_once_and_the_call_succeeds(monkeypatch):
             raise seq.pop(0)
         return _Resp(json.dumps({"ok": 1}).encode(), {})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     assert d.get("/api/info", {"id": "t3_x"}) == {"ok": 1}
     assert len(mints) == 2, "the 401 should have forced exactly one re-mint"
@@ -467,7 +467,7 @@ def test_a_200_carrying_an_auth_error_is_treated_as_an_expired_token(monkeypatch
             return _token_response()
         return _Resp(seq.pop(0) if seq else json.dumps({"ok": 1}).encode(), {})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mobile.Device, "open", lambda self, req, timeout=None: fake_urlopen(req))
     d = mobile.Device()
     assert d.get("/api/info", {"id": "t3_x"}) == {"ok": 1}
     assert len(mints) == 2
@@ -531,6 +531,13 @@ def test_comments_accepts_a_fullname_or_a_bare_id(monkeypatch):
 
 
 # --------------------------------------------------------------------------- SEARCH_ROUTE
+
+
+@pytest.fixture
+def proxy_value():
+    before = settings.proxy
+    yield lambda v: set_frozen(settings, "proxy", v or None)
+    set_frozen(settings, "proxy", before)
 
 
 @pytest.fixture
@@ -614,3 +621,99 @@ def test_mobile_search_never_silently_falls_back_to_the_browser(route, mobile_on
     with pytest.raises(scraper.ScrapeFailed):
         scrape_search(["gymshark reviews"], fetcher=reddit)
     assert reddit.calls == []
+
+
+# --------------------------------------------------------------------------- exit IPs
+#
+# Reddit blocked this host's IP from oauth.reddit.com on 18 Sep 2026, so the route that once needed
+# no proxy now depends on one. These pin the parts that were easy to get subtly wrong.
+
+
+def test_a_device_keeps_one_exit_for_its_whole_life(proxy_value):
+    """A token minted from one exit and used from another is exactly the inconsistency this route
+    exists to avoid - and a real phone does not change IP between two calls of one session."""
+    proxy_value("gw.dataimpulse.com:10000:user:pw")
+    d = mobile.Device()
+    d.attach_exit(10042)
+    assert d.port == 10042
+    proxies = d._opener.handlers and [h for h in d._opener.handlers if hasattr(h, "proxies")]
+    assert proxies, "the device must carry its own opener, not fall back to urlopen"
+    assert "10042" in proxies[0].proxies["https"]
+
+
+def test_two_live_devices_never_share_an_exit(proxy_value):
+    """`lease()` returns its port the moment the block exits; a device holds its port for its whole
+    life, so it must use acquire()/release() instead. Getting this wrong silently puts two
+    'phones' on one IP, which is the fingerprint the pool exists to prevent."""
+    proxy_value("gw.dataimpulse.com:10000:user:pw")
+    pool = mobile._DevicePool(3)
+    import threading as _t
+
+    seen, lock, ready = [], _t.Lock(), _t.Barrier(3)
+
+    def hold():
+        with pool.lease() as d:
+            with lock:
+                seen.append(d.port)
+            ready.wait(timeout=5)
+
+    threads = [_t.Thread(target=hold) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert len(seen) == 3
+    assert len(set(seen)) == 3, f"two devices shared an exit: {seen}"
+
+
+def test_a_retired_device_gives_its_exit_back(proxy_value):
+    """Otherwise a run of blocks would strand the whole sticky range and the service would end up
+    scraping direct - the one thing Reddit reliably refuses."""
+    proxy_value("gw.dataimpulse.com:10000:user:pw")
+    pool = mobile._DevicePool(1)
+    with pool.lease() as d:
+        port = d.port
+        d.retired = True
+    assert port is not None
+    from reddit_reviews.proxy import _port_pool
+    assert port in _port_pool._free, "a retired device must not keep its exit"
+
+
+def test_a_block_names_the_exit_port_but_never_the_credential(proxy_value, monkeypatch):
+    proxy_value("gw.dataimpulse.com:10000:user:sup3rs3cret")
+    d = mobile.Device()
+    d.attach_exit(10077)
+    body = b"<html>you've been <b>blocked by network security</b></html>"
+
+    def boom(self, req, timeout=None):
+        raise _http_error(403, {}, body)
+
+    monkeypatch.setattr(mobile.Device, "open", boom)
+    with pytest.raises(mobile.MobileBlocked) as e:
+        d.mint()
+    assert "10077" in str(e.value)
+    assert "sup3rs3cret" not in str(e.value)
+
+
+def test_without_a_proxy_the_device_ignores_the_ambient_env_proxy(proxy_value, monkeypatch):
+    """urllib silently honours HTTPS_PROXY from the environment, which would send these calls
+    somewhere nobody chose.
+
+    Asserted by ABSENCE, which is counter-intuitive: `build_opener(ProxyHandler({}))` drops the empty
+    handler (it registers no *_open methods), but passing it still marks ProxyHandler as overridden,
+    so urllib never creates its default env-reading one. No ProxyHandler in the opener is therefore
+    exactly the proof that the environment is being ignored.
+    """
+    proxy_value("")
+    monkeypatch.setenv("HTTPS_PROXY", "http://somewhere-else.invalid:3128")
+    d = mobile.Device()
+    d.attach_exit(None)
+    assert [h for h in d._opener.handlers if isinstance(h, urllib.request.ProxyHandler)] == []
+
+    # And the contrast: a real exit DOES install one, pointed where we said.
+    proxy_value("gw.dataimpulse.com:10000:user:pw")
+    e = mobile.Device()
+    e.attach_exit(10055)
+    installed = [h for h in e._opener.handlers if isinstance(h, urllib.request.ProxyHandler)]
+    assert installed and "10055" in installed[0].proxies["https"]
+    assert "somewhere-else" not in installed[0].proxies["https"]

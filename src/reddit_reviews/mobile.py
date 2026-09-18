@@ -10,8 +10,8 @@ cannot serve search without changing what Stage 4 reads.
 
 `search()` therefore exists but is OFF by default, behind SEARCH_ROUTE=mobile. It is there to
 measure that difference on real brands rather than argue about it, and because it costs nothing at
-all: no browser, no proxy, bodies included in the response. It is not a cheaper way to get the same
-results; it is a different result set that happens to be free.
+all beyond the proxy bytes below: no browser, no body-fill phase, bodies included in the response.
+It is not a cheaper way to get the same results; it is a different result set.
 
 Fetching a post or its comments BY ID involves no ranking at all, and there the app API is
 strictly better: one `/api/info` call returned all 30 browser-found ids with full `selftext` in
@@ -30,6 +30,22 @@ Reddit sees one phone reading about one brand.
 Transport only, by design: it returns Reddit's raw JSON and imports nothing from `scraper`, which
 is what keeps the two free of a cycle. `scraper` owns the conversion to `Post`/`Comment` and owns
 the decision to fall back to the browser when this route is unavailable.
+
+This route USED to need no proxy at all - that was most of its appeal. On 18 Sep 2026 Reddit
+blocked this host's IP from `oauth.reddit.com` outright, mint and API calls alike, about a day
+after we minted ~25 tokens from it. Measured that afternoon: a direct mint returns the 403 block
+page, a mint through a residential exit returns a token, and - contrary to the method note's
+section 4.5 - that proxy-minted token is STILL refused when used directly from this host. So the
+whole route goes through the proxy now.
+
+The bandwidth case survives intact, because it never rested on this route being unproxied: it
+rested on ~270 KB of API calls replacing ~29 browser page loads at ~1 MB each. Proxying 270 KB
+costs a fraction of a cent.
+
+Each device holds ONE sticky exit for its whole life, leased from the same pool the browser uses.
+That is stricter than it needs to be for bandwidth and deliberate for fingerprinting: a real phone
+does not change IP between two calls of one session, and a token minted from one exit then used
+from another is the kind of inconsistency this route exists to avoid.
 
 Stdlib HTTP on purpose. The runtime dependency list stays as it was, and gzip is handled here so
 the bytes we count are the bytes that actually crossed the wire.
@@ -52,6 +68,7 @@ from collections.abc import Iterator
 from urllib.parse import urlencode
 
 from .config import settings
+from .proxy import STICKY_PORT_RANGE, _port_pool, proxy_url
 
 log = logging.getLogger("reddit_reviews.mobile")
 
@@ -124,6 +141,23 @@ class Device:
         self.reset_at = 0.0
         self.retired = False
         self._last_call = 0.0
+        # One exit IP for this device's whole life. None means direct, which now only works off
+        # this host - kept so the module still runs unproxied wherever Reddit still allows it.
+        self.port: int | None = None
+        self._opener: urllib.request.OpenerDirector | None = None
+
+    def attach_exit(self, port: int | None) -> None:
+        """Pin this device to one exit IP for its whole life."""
+        self.port = port
+        url = proxy_url(port)
+        handler = urllib.request.ProxyHandler({"http": url, "https": url} if url else {})
+        self._opener = urllib.request.build_opener(handler)
+
+    def open(self, req, timeout):
+        # ProxyHandler({}) is not the same as no opener: without it urllib silently falls back to
+        # the environment's proxy settings, which would send these calls somewhere unintended.
+        opener = self._opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(req, timeout=timeout)
 
     # ----------------------------------------------------------------- token
 
@@ -152,7 +186,7 @@ class Device:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=settings.mobile_timeout_s) as r:
+            with self.open(req, settings.mobile_timeout_s) as r:
                 body, headers = _read(r)
         except urllib.error.HTTPError as e:
             raw = e.read()
@@ -160,7 +194,8 @@ class Device:
             if e.code == 403 and BLOCK_MARKER in raw[:400_000].decode("utf-8", "ignore").lower():
                 self.retired = True
                 _bump("blocked")
-                raise MobileBlocked("reddit blocked the token mint") from e
+                via = f" (exit port {self.port})" if self.port else " (direct, no proxy)"
+                raise MobileBlocked(f"reddit blocked the token mint{via}") from e
             _bump("errors")
             raise MobileError(f"token mint failed: http {e.code}") from e
         except OSError as e:  # DNS, TLS, timeout
@@ -224,7 +259,7 @@ class Device:
             req = urllib.request.Request(url, headers=self._headers())
             self._last_call = time.time()
             try:
-                with urllib.request.urlopen(req, timeout=settings.mobile_timeout_s) as r:
+                with self.open(req, settings.mobile_timeout_s) as r:
                     body, headers = _read(r)
                 _bump("calls")
                 self._read_limits(headers)
@@ -274,7 +309,9 @@ class Device:
             self.retired = True
             _bump("blocked")
             blocked = BLOCK_MARKER in raw[:400_000].decode("utf-8", "ignore").lower()
-            raise MobileBlocked("reddit blocked this device" if blocked else "403 with no retry hint") from e
+            via = f" (exit port {self.port})" if self.port else " (direct, no proxy)"
+            raise MobileBlocked((f"reddit blocked this device{via}" if blocked
+                                 else f"403 with no retry hint{via}")) from e
         if e.code == 401:
             _bump("unauthorized")
             self.token = ""
@@ -309,12 +346,22 @@ class _DevicePool:
         self._slots.acquire()
         try:
             with self._lock:
-                device = self._free.pop() if self._free else Device()
+                device = self._free.pop() if self._free else None
+            if device is None:
+                # A new device takes a sticky exit and HOLDS it, so its token is always presented
+                # from the IP it was minted at. Deliberately not `lease()`: that context manager
+                # returns the port the moment the block exits, which would let two devices share an
+                # exit and undo the whole point.
+                device = Device()
+                device.attach_exit(_port_pool.acquire())
             try:
                 yield device
             finally:
                 with self._lock:
-                    if not device.retired:
+                    if device.retired:
+                        # The exit goes back so a retired device does not strand a port forever.
+                        _port_pool.release(device.port)
+                    else:
                         self._free.append(device)
         finally:
             self._slots.release()
