@@ -31,6 +31,7 @@ from urllib.parse import urlencode
 
 from scrapling.parser import Selector
 
+from . import mobile
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -135,6 +136,9 @@ class SearchResult:
     # Reddit had" from "we ran out of time"; both return 200. `failed_terms` is not a substitute,
     # it means a term errored.
     truncated: bool = False
+    # Posts whose body came from the mobile API instead of a browser page fetch. Every one of these
+    # is a ~2.8 MB proxied page we did not pay for, so it is the number that shows the hybrid working.
+    mobile_posts: int = 0
 
 
 @dataclass
@@ -147,6 +151,8 @@ class ThreadsResult:
     # As above. Deliberately NOT folded into `failed`: a thread we ran out of time for is not a
     # thread Reddit refused, and Stage 4 treats those differently.
     truncated: bool = False
+    # Threads served by the mobile API rather than the browser. As above: the hybrid's receipt.
+    mobile_threads: int = 0
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -216,6 +222,18 @@ def thread_url(raw: str) -> str:
     if not m:
         raise ValueError(f"not a reddit thread link: {str(raw)[:120]!r}")
     return f"{BASE}/r/{m.group(1)}/comments/{m.group(2).lower()}/"
+
+
+def post_id_of(raw: str) -> str:
+    """The bare post id out of any thread link. Raises ValueError for anything that is not a thread.
+
+    This is the whole bridge between the two routes: the browser finds posts and knows their URLs,
+    and the mobile API is addressed by id.
+    """
+    m = THREAD_PATH_RE.search(str(raw or ""))
+    if not m:
+        raise ValueError(f"not a reddit thread link: {str(raw)[:120]!r}")
+    return m.group(2).lower()
 
 
 # --------------------------------------------------------------------------- parsing
@@ -359,6 +377,65 @@ def parse_thread(html: str, url: str = "") -> Thread:
             )
         )
     return Thread(post=post, comments=comments, url=url)
+
+
+# ------------------------------------------------------- the same models, from the mobile route
+#
+# The browser reads attributes off rendered HTML; the app API hands back JSON. Both end up as the
+# same `Post` and `Comment`, because everything downstream - mapping.py, Stage 4's Code nodes -
+# must not be able to tell which route served a given item. That includes the small things: text is
+# whitespace-collapsed here exactly as `_text()` does it for HTML, so a body does not change shape
+# depending on which route fetched it.
+
+
+def _epoch_iso(ts) -> str:
+    """Reddit's JSON dates its content with a UNIX float; the HTML carries a formatted string.
+    Both become the `...Z` form Stage 4 parses with Date.parse."""
+    try:
+        return datetime.fromtimestamp(float(ts), timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _flat(text) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def post_from_raw(raw: dict, search_term: str = "") -> Post:
+    return Post(
+        id=str(raw.get("name") or ("t3_" + str(raw.get("id") or ""))),
+        title=_flat(raw.get("title")),
+        body=_flat(raw.get("selftext")),
+        subreddit=str(raw.get("subreddit") or ""),
+        author=str(raw.get("author") or ""),
+        created_at=_epoch_iso(raw.get("created_utc")),
+        score=_int(raw.get("score")),
+        num_comments=_int(raw.get("num_comments")),
+        permalink=str(raw.get("permalink") or ""),
+        nsfw=bool(raw.get("over_18")),
+        body_is_snippet=False,
+        search_term=search_term,
+    )
+
+
+def comment_from_raw(raw: dict, subreddit: str = "") -> Comment | None:
+    """None for a comment with nothing to quote, matching the browser path, which drops deleted and
+    removed comments because they render no body element at all."""
+    body = _flat(raw.get("body"))
+    if not body or body in ("[deleted]", "[removed]"):
+        return None
+    return Comment(
+        id=str(raw.get("name") or ("t1_" + str(raw.get("id") or ""))),
+        post_id=str(raw.get("link_id") or ""),
+        parent_id=str(raw.get("parent_id") or ""),
+        body=body,
+        subreddit=str(raw.get("subreddit") or subreddit),
+        author=str(raw.get("author") or ""),
+        created_at=_epoch_iso(raw.get("created_utc")),
+        score=_int(raw.get("score")),
+        depth=_int(raw.get("depth")),
+        permalink=str(raw.get("permalink") or ""),
+    )
 
 
 # --------------------------------------------------------------------------- fetching
@@ -615,17 +692,66 @@ def scrape_search(
         err = outcomes[terms[0]]
         assert isinstance(err, RedditError)
         raise err if isinstance(err, (ScrapeBlocked, ScrapeFailed)) else ScrapeFailed(str(err))
+    mobile_posts = 0
     if full_bodies and posts:
-        filled, bodies_truncated = fill_bodies(posts[: settings.max_body_fetches], fetcher, deadline=deadline)
-        pages += filled
-        truncated = truncated or bodies_truncated
+        wanted = posts[: settings.max_body_fetches]
+        # The mobile route fills every body in one call, so try it before spending a browser page on
+        # any of them. The fallback is all-or-nothing on purpose: `None` means the route itself was
+        # unavailable and the browser should do the whole job, while a number means it answered, and
+        # we trust that answer rather than browser-fetching the handful of posts Reddit withheld.
+        # Per-post fallback would look more thorough and would quietly reintroduce the bandwidth this
+        # exists to remove - a partial mobile answer would put ~25 proxied pages back on the bill.
+        done = fill_bodies_mobile(wanted) if mobile.available() else None
+        if done is None:
+            filled, bodies_truncated = fill_bodies(wanted, fetcher, deadline=deadline)
+            pages += filled
+            truncated = truncated or bodies_truncated
+        else:
+            mobile_posts = done
     return SearchResult(
         posts=posts,
         pages_fetched=pages,
         seconds=round(time.time() - started, 1),
         failed_terms=failed,
         truncated=truncated,
+        mobile_posts=mobile_posts,
     )
+
+
+def fill_bodies_mobile(posts: list[Post]) -> int | None:
+    """Fill full bodies from the mobile API, in place. Never raises.
+
+    One call covers up to 100 posts, replacing what cost one proxied browser page each - the single
+    biggest line on the bandwidth bill.
+
+    Returns the number of posts Reddit answered for, or `None` if the route was unavailable, which
+    is the caller's signal to do the whole job with the browser instead. The two are deliberately
+    distinguishable: zero can legitimately mean "every one of these was a link post".
+    """
+    by_id = {p.id: p for p in posts if p.id}
+    if not by_id:
+        return 0
+    try:
+        raw = mobile.info(list(by_id))
+    except mobile.MobileError as e:
+        log.warning("mobile body fill unavailable, falling back to the browser: %s", e)
+        return None
+
+    answered = 0
+    for name, data in raw.items():
+        post = by_id.get(name)
+        if post is None:
+            continue
+        # Assigned even when empty. A link or image post has no self text, and the browser path sets
+        # an empty body for exactly those, so anything else would make the two routes disagree.
+        post.body = _flat(data.get("selftext"))
+        post.body_is_snippet = False
+        # Reddit's live figures beat the search index's.
+        post.score = _int(data.get("score")) or post.score
+        post.num_comments = _int(data.get("num_comments")) or post.num_comments
+        answered += 1
+    log.info("mobile filled %d of %d post body(ies) in one call", answered, len(by_id))
+    return answered
 
 
 def fill_bodies(posts: list[Post], fetcher: Fetcher = fetch_html, deadline: float | None = None) -> tuple[int, bool]:
@@ -699,6 +825,14 @@ def scrape_threads(
     skipped: list[str] = []
     lock = threading.Lock()
 
+    # The mobile route reads a thread by id, with no ranking involved and no proxy, so it serves the
+    # comments call outright. Anything it cannot answer for is left in `pending` and read by the
+    # browser below, which is why a change on Reddit's side costs bandwidth rather than results.
+    pending = list(canonical)
+    mobile_threads = 0
+    if mobile.available():
+        pending, mobile_threads = _threads_via_mobile(canonical, outcomes, max_comments_per_post)
+
     def run(u: str) -> None:
         if time.time() + _fetch_cost_s(ATTEMPTS) > deadline:
             # Not an error: we never asked Reddit. Recording it in `failed` would make a clock
@@ -711,8 +845,9 @@ def scrape_threads(
         except RedditError as e:
             outcomes[u] = e
 
-    with ThreadPoolExecutor(max_workers=len(canonical)) as pool:
-        list(pool.map(run, canonical))
+    if pending:
+        with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+            list(pool.map(run, pending))
 
     threads: list[Thread] = []
     missing: list[str] = []
@@ -740,10 +875,58 @@ def scrape_threads(
         log.info("budget exhausted, %d of %d thread(s) never attempted", len(skipped), len(canonical))
     return ThreadsResult(
         threads=threads,
-        # Threads we never attempted are not pages we fetched.
-        pages_fetched=len(canonical) - len(skipped),
+        # Browser page fetches only: threads we never attempted are not pages we fetched, and neither
+        # are threads the mobile route served. `mobile_threads` carries those, so the two numbers stay
+        # readable as what they cost - a page here is a proxied megabyte, a mobile call is not.
+        pages_fetched=len(pending) - len(skipped),
         seconds=round(time.time() - started, 1),
         missing=missing,
         failed=failed,
         truncated=bool(skipped),
+        mobile_threads=mobile_threads,
     )
+
+
+def _threads_via_mobile(
+    canonical: list[str], outcomes: dict[str, Thread | RedditError], max_comments_per_post: int
+) -> tuple[list[str], int]:
+    """Read what it can through the mobile API, recording results into `outcomes`.
+
+    Returns (urls the browser still has to read, threads served here). Per-thread fallback is right
+    here, unlike the body fill: a thread costs one call either way, so retrying a single failure on
+    the browser buys a real result for one page, not twenty-five.
+
+    A hard block stops the loop rather than working through the rest, because the device is gone and
+    every further call would be a guaranteed failure paid for in latency.
+    """
+    pending: list[str] = []
+    served = 0
+    blocked = False
+    for url in canonical:
+        if blocked:
+            pending.append(url)
+            continue
+        try:
+            raw_post, raw_comments = mobile.comments(post_id_of(url), limit=max_comments_per_post)
+        except mobile.MobileBlocked as e:
+            log.warning("mobile route blocked, the browser takes the rest of this call: %s", e)
+            blocked = True
+            pending.append(url)
+            continue
+        except (mobile.MobileError, ValueError) as e:
+            log.info("mobile could not read %s, falling back to the browser: %s", url, e)
+            pending.append(url)
+            continue
+
+        # A deleted or private thread is not a failure to retry on the browser - the browser would
+        # render no post either and raise exactly this. Recording it here saves that wasted page.
+        if not raw_post or raw_post.get("removed_by_category") or not raw_post.get("id"):
+            outcomes[url] = ThreadMissing(f"thread is unavailable: {url}")
+            served += 1
+            continue
+
+        post = post_from_raw(raw_post)
+        comments = [c for c in (comment_from_raw(r, post.subreddit) for r in raw_comments) if c is not None]
+        outcomes[url] = Thread(post=post, comments=comments, url=url)
+        served += 1
+    return pending, served

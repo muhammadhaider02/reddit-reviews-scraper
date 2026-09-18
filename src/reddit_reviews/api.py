@@ -27,6 +27,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from . import __version__
 from .config import settings
 from .mapping import comment_item, post_item
+from .mobile import counters as mobile_counters
 from .scraper import RedditError, scrape_search, scrape_threads
 
 log = logging.getLogger("reddit_reviews.api")
@@ -169,6 +170,7 @@ async def reddit(req: RedditRequest):
                 "X-Threads-Missing": str(len(res.missing)),
                 "X-Threads-Failed": str(len(res.failed)),
                 "X-Truncated": "true" if res.truncated else "false",
+                "X-Mobile-Threads": str(res.mobile_threads),
             }
             summary = f"threads={len(res.threads)} comments={len(items) - len(res.threads)} missing={len(res.missing)} failed={len(res.failed)}"
             seconds = res.seconds
@@ -189,6 +191,7 @@ async def reddit(req: RedditRequest):
                 "X-Pages-Fetched": str(res.pages_fetched),
                 "X-Terms-Failed": str(len(res.failed_terms)),
                 "X-Truncated": "true" if res.truncated else "false",
+                "X-Mobile-Posts": str(res.mobile_posts),
             }
             summary = f"terms={len(req.search_terms)} posts={len(items)} failed_terms={len(res.failed_terms)}"
             seconds = res.seconds
@@ -223,5 +226,10 @@ async def health():
         "auth": bool(settings.api_token),
         "proxy": bool(settings.proxy),
         "max_concurrency": settings.max_concurrency,
+        # The mobile route is an optimisation in front of a working browser path, so its failures are
+        # logged and swallowed rather than surfaced as errors. These counters are the only way to see
+        # it stop working: `blocked` climbing, or `calls` flat while requests keep arriving, means
+        # Reddit closed the door and every call is quietly back on the proxy at ~11x the bandwidth.
+        "mobile": {"enabled": settings.mobile_enabled, **mobile_counters},
         **counters,
     }

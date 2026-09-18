@@ -58,6 +58,25 @@ class Settings:
     scrape_budget_s: int = _env_int("SCRAPE_BUDGET_S", 200)
     # Hard cap on thread URLs read per call, whatever the caller sends.
     max_threads: int = _env_int("MAX_THREADS", 10)
+    # ----------------------------------------------------------------- the mobile route
+    # Reddit's own Android app reads through an anonymous OAuth token that is gated on client
+    # identity, not on IP - so it answers this datacenter host without a proxy at all. We use it for
+    # everything fetched BY ID (post bodies, comment trees) and never for search, because the app's
+    # search is a different index: measured 18 Sep 2026, its top-100 held 2 of the 30 posts the web
+    # search put in its top-10. See mobile.py. Turning this off falls the whole service back to the
+    # browser, which still works - it just costs ~11x the proxy bandwidth.
+    mobile_enabled: bool = _env_bool("MOBILE_ENABLED", True)
+    # Devices (fake phones) that may be in flight at once. One call leases one device for all of its
+    # sub-requests, so this caps concurrent CALLS on this route, not requests.
+    mobile_devices: int = _env_int("MOBILE_DEVICES", 3)
+    # Re-mint when a token's 100-per-10-minutes budget falls this low. A fresh token gets a fresh budget.
+    mobile_min_budget: float = float(os.environ.get("MOBILE_MIN_BUDGET", "10"))
+    # Minimum gap between two calls on one device, plus up to this much jitter. Reddit's ceiling is
+    # 100 per 10 min per token; 8 thread reads at ~2.5s apart is ~20s, well inside Stage 4's 250s.
+    mobile_spacing_s: float = float(os.environ.get("MOBILE_SPACING_S", "2"))
+    mobile_spacing_jitter_s: float = float(os.environ.get("MOBILE_SPACING_JITTER_S", "1"))
+    # Per-request timeout. These calls answer in ~0.2s; this is only for a hung socket.
+    mobile_timeout_s: int = _env_int("MOBILE_TIMEOUT_S", 25)
     # Pause before retrying a blocked page, seconds.
     retry_delay_s: float = float(os.environ.get("RETRY_DELAY_S", "2"))
     host: str = os.environ.get("HOST", "0.0.0.0")
