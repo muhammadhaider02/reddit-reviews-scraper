@@ -377,11 +377,28 @@ def test_proxy_config_port_override_picks_the_exit(proxy_value):
     assert scraper.proxy_config(10042)["server"] == "http://us.decodo.com:10042"
 
 
-def test_proxy_config_refuses_the_rotating_gateway(proxy_value):
-    # Port 7000 hands out a new exit IP per request, which would move us mid-scrape.
-    proxy_value("us.decodo.com:7000:user:pw")
+def test_proxy_config_refuses_every_vendors_rotating_gateway(proxy_value):
+    # A rotating gateway hands out a new exit IP per request, which would move us mid-scrape.
+    # Both vendors default to it in their dashboard, so both have to be named.
+    for credential, vendor in [("us.decodo.com:7000:user:pw", "Decodo"),
+                               ("gw.dataimpulse.com:823:user:pw", "DataImpulse")]:
+        proxy_value(credential)
+        with pytest.raises(ValueError, match="rotating gateway") as e:
+            scraper.proxy_config()
+        assert vendor in str(e.value), "the message has to name the vendor whose dashboard to fix"
+
+
+def test_the_url_form_cannot_smuggle_a_rotating_gateway_past_the_guard(proxy_value):
+    """A plain URL skips the four-field parser, and DataImpulse hands out its credential in exactly
+    that shape - so without this the guard is trivially bypassed by pasting what the vendor gives you."""
+    proxy_value("http://user:pw@gw.dataimpulse.com:823")
     with pytest.raises(ValueError, match="rotating gateway"):
         scraper.proxy_config()
+
+
+def test_the_url_form_still_passes_through_on_a_sticky_port(proxy_value):
+    proxy_value("http://user:pw@gw.dataimpulse.com:10000")
+    assert scraper.proxy_config() == "http://user:pw@gw.dataimpulse.com:10000"
 
 
 def test_proxy_config_passes_a_plain_url_through(proxy_value):

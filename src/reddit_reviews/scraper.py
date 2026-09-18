@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Iterator
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from scrapling.parser import Selector
 
@@ -449,7 +449,12 @@ _browser_gate = threading.BoundedSemaphore(max(1, settings.max_concurrency))
 # the port number is effectively the session handle, and a different port is the only way to reach a
 # different exit. Half-open, so the usable ports are 10001..10099.
 STICKY_PORT_RANGE = (10001, 10100)
-ROTATING_GATEWAY_PORT = "7000"
+# Every residential vendor publishes the same pool on two kinds of port, and the rotating one is
+# always the default in their dashboard - so this is the mistake that gets made, not a hypothetical.
+# Keyed by port because that is all the credential tells us. Decodo 7000, DataImpulse 823. Both
+# vendors' sticky ranges cover STICKY_PORT_RANGE (Decodo 10001-10099, DataImpulse 10000-20000), so
+# the pool above needs no per-vendor handling.
+ROTATING_GATEWAY_PORTS = {"7000": "Decodo", "823": "DataImpulse"}
 
 
 def proxy_config(port: int | None = None) -> dict[str, str] | str | None:
@@ -469,18 +474,35 @@ def proxy_config(port: int | None = None) -> dict[str, str] | str | None:
     if not raw:
         return None
     if "://" in raw:
+        # A plain proxy URL, passed through untouched - but still checked, because the guard below is
+        # the whole point of this function and a URL is the easy way to walk straight past it. This
+        # is not hypothetical: DataImpulse hands out `user:pass@host:823` in exactly this shape.
+        _reject_rotating_gateway(urlsplit(raw).port)
         return raw
     # Deliberately unguarded: a credential with fewer than four fields raises ValueError here, and a
     # config fault should stop the scrape rather than silently let it run from the blocked server IP.
     host, configured, user, pw = raw.split(":", 3)
-    if configured == ROTATING_GATEWAY_PORT:
-        raise ValueError(
-            f"SCRAPER_PROXY points at Decodo's rotating gateway (port {ROTATING_GATEWAY_PORT}). "
-            f"Use a sticky port ({STICKY_PORT_RANGE[0]}): one exit IP has to serve a whole fetch."
-        )
+    _reject_rotating_gateway(configured)
     # http:// and not socks5://: Chromium ignores SOCKS credentials, so an authenticated socks5 proxy
     # silently drops the username and password and the gateway refuses the connection.
     return {"server": f"http://{host}:{port if port is not None else configured}", "username": user, "password": pw}
+
+
+def _reject_rotating_gateway(port) -> None:
+    """Refuse a rotating gateway loudly, at config time.
+
+    A rotating gateway hands out a new exit IP per REQUEST. Search follows Reddit's cursor across
+    several pages as one session, so rotating would give Reddit a different address for every page of
+    one scrape - which is the pattern that gets a session refused. The failure it causes is a bad one
+    to debug, because it looks exactly like being blocked.
+    """
+    vendor = ROTATING_GATEWAY_PORTS.get(str(port or ""))
+    if vendor:
+        raise ValueError(
+            f"SCRAPER_PROXY points at {vendor}'s rotating gateway (port {port}). Use a sticky port "
+            f"({STICKY_PORT_RANGE[0]}): one exit IP has to serve a whole fetch, and the cursor pages "
+            f"after it."
+        )
 
 
 class _PortPool:
