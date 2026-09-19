@@ -12,108 +12,49 @@
 
 Self-hosted Reddit post and comment scraper with an HTTP API.
 
+[Architecture](docs/architecture.md) · [API](docs/api.md) · [Deployment](docs/deployment.md)
+
 </div>
 
 ---
 
 ## Platform
 
-This repo is a standalone Reddit collection service, the sibling of `trustpilot-reviews`. Given search terms it reads Reddit's search pages with a stealth browser and returns the matching posts; given thread links it returns each thread's post and comments. It serves the result over a small authenticated HTTP API that automation workflows call like any other data service.
-
-Two routes, split by whether ranking is involved.
-
-**Search needs the browser.** Reddit's public JSON endpoints (`/search.json`, `/comments/<id>.json`) answer `403 blocked by network security` to plain HTTP clients and to the stealth browser alike. The regular web pages are server-rendered with the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`), which is what this service reads, through a residential proxy.
-
-**Everything fetched by id does not.** Reddit's own Android app reads through an anonymous OAuth token that is gated on client identity rather than on IP, so it answers a datacenter host directly, with no proxy and no browser. Post bodies and comment trees come from there (`mobile.py`), which is where ~95% of the proxy bandwidth and ~80% of the wall clock went: measured on one brand, 92.1 MB and 185s became 4.8 MB and 37s, for the same posts and comments.
-
-The line between them is not a preference. The app's search is a *different index*: measured 18 Sep 2026 across three brands, its top-100 held 2 of the 30 posts the web search put in its top-10, so serving search from it would change what callers read. `MOBILE_ENABLED=false` falls everything back to the browser, which still works and simply costs what it used to.
+This repo is a standalone Reddit collection service behind the SmartLead brand-research pipeline, running over its own HTTP API. It is the sibling of `trustpilot-reviews`, which serves Trustpilot the same way, and both stand in for the Apify actors the pipeline used to call.
 
 ## Quickstart
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/) and, for the Stage 4 node tests, Node.js. Runs as a single FastAPI process.
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Runs as a single FastAPI process.
 
 ```bash
 git clone https://github.com/haider-ecombench/reddit-reviews-scraper.git
 cd reddit-reviews-scraper
 
-uv sync                       # dependencies into a uv-managed venv
-uv run scrapling install      # stealth browser (once)
+uv sync                               # dependencies into a uv-managed venv
+uv run scrapling install              # stealth browser for page scraping (once)
 
-cp .env.example .env          # then set API_TOKEN (see Configuration)
+cp .env.example .env                  # then fill in credentials (see Configuration)
 
-uv run reddit-reviews serve   # HTTP service on :8001
+uv run reddit-reviews serve           # HTTP service on :8001
 ```
 
 Verify with `curl localhost:8001/health` (expects `"status":"ok"`); interactive API docs are at `/docs`.
 
-The service is driven over its HTTP API: `POST /reddit` takes `Authorization: Bearer <API_TOKEN>` and either `searchTerms` (post search) or `startUrls` (threads and their comments), while `GET /health` is unauthenticated and returns request counters. See `/docs` for the request fields, the response shape and the error contract.
-
-One-off scrapes from the command line, no server needed:
-
-```bash
-uv run reddit-reviews search "Gymshark" "Gymshark reviews" --max 10 --pretty
-uv run reddit-reviews thread https://www.reddit.com/r/Gymshark/comments/1vf53rw/ --max-comments 20 --pretty
-```
+The service is driven over its HTTP API: post search by terms, and threads with their comments by link, in the Apify actor's request and response shape. See [api.md](docs/api.md) for endpoints, auth (`Authorization: Bearer`) and the error contract.
 
 ## Configuration
 
-All configuration is environment variables in `.env`. **`.env.example` is the canonical list.** Copy it and fill it in; every variable is documented there alongside the measurement its default is based on.
+All configuration is environment variables in `.env`. **`.env.example` is the canonical list.** Copy it and fill in your keys; the full reference with defaults lives in [architecture.md](docs/architecture.md#configuration-environment-variables).
 
-`API_TOKEN` is the bearer token callers must send, and is required in production. `SCRAPER_PROXY` is worth setting early: Reddit blocks by IP, and a datacenter address will need a residential proxy for the search half. The rest tune the browser: concurrency, per-page timeout, page and thread caps, resource blocking and full-body fetching.
-
-The service is a hybrid by design: the browser reads Reddit's web search through the residential proxy, and everything fetched by id (post bodies, comment trees) goes through the Android app's anonymous API. That is what takes a brand from ~92 MB of proxied pages to ~5 MB. A full-mobile search route was measured over 103 brands and removed: the app's search is a different index (7.2% post overlap) that yields less than half the usable comment material.
-
-`MOBILE_ENABLED` (default on) is the kill switch for the id-fetching route. Turn it off if Reddit closes that door; the service keeps working on the browser alone at roughly 20x the bandwidth. `GET /health` reports the route's own counters under `mobile`, and `X-Mobile-Posts` / `X-Mobile-Threads` say per call how much of the work it took. Those counters are the only warning available, because the route fails soft by design: a failure falls back to the browser and is logged, not surfaced as an error.
-
-`SCRAPE_BUDGET_S` bounds a single call's wall clock. Past it the service returns the posts, bodies and threads it has already collected and sets an `X-Truncated` response header, rather than running on past the caller's own timeout holding a browser nobody is waiting for.
+Required values are the API bearer token and a residential proxy (Reddit blocks datacenter IPs). The rest tune the browser, the per-call budget and the mobile route.
 
 ## Development
 
 ```bash
-uv run pytest            # 54 unit + Stage 4 node tests against saved pages, no network
+uv run pytest            # unit + Stage 4 node tests against saved pages, no network
 uv run pytest -m live    # one real search and thread through the stealth browser
 ```
 
-Layout: `scraper.py` (URLs, fetch, parse, orchestration), `mapping.py` (output shape), `api.py` (FastAPI surface), `config.py` (env). Fixtures in `tests/fixtures/` are real Reddit pages with styles, scripts and SVGs stripped; refresh them if Reddit changes its markup.
-
-`tests/n8n/` holds verbatim copies of the **Sort Reddit Results** and **Fetch Reddit Comments** Code nodes and a script that replays the whole Reddit chain against a running server, so the workflow's own JavaScript is tested here before the workflow is touched. See [tests/n8n/README.md](tests/n8n/README.md).
-
-Measured on a residential connection: a search page in ~5 s, a thread page in ~8 s. Stage 4's search call (3 terms, 10 posts each, full bodies) takes ~95 s alone and ~185 s when two brands overlap; the comments call (8 threads × 20 comments) ~30 s.
-
 ## Deployment
 
-Production runs as a single Docker container on the same VPS as n8n, attached to n8n's Docker network. `docker-compose.yml` is the deployment topology. It carries the memory limits, process reaping, shutdown grace and log rotation that a bare `docker run` would not, and its comments record the measurements each limit is sized against.
-
-```bash
-git clone https://github.com/haider-ecombench/reddit-reviews-scraper.git
-cd reddit-reviews-scraper
-cp .env.example .env          # set API_TOKEN
-docker compose up -d --build  # first build is slow: it downloads Chromium
-```
-
-n8n reaches the service by container name over the shared network:
-
-```
-http://reddit-reviews:8001/reddit
-```
-
-Nothing is published to the host and nothing is reachable from the internet, so there is no domain, no TLS certificate and no reverse proxy to maintain for this service. The VPS already runs Traefik on 80/443 for n8n's own UI; adding a second proxy would fail to bind. `API_TOKEN` still applies and is still worth setting, so a compromised container on the network cannot drive the scraper freely.
-
-The network is declared external in `docker-compose.yml` as `n8n_default`, the default Compose creates for n8n's project. If that name differs the container refuses to start and says so; `docker network ls` gives the real one.
-
-Check from the server itself before pointing the workflow at it — Reddit blocks by IP, and a datacenter address will likely need `SCRAPER_PROXY`:
-
-```bash
-docker compose exec scraper uv run --no-sync reddit-reviews search "gymshark reviews" --max 3
-```
-
-**Switching Stage 4 over** is limited to the two HTTP Request nodes. Keep their names: `Build Run Telemetry` counts calls by node name.
-
-| Node | Change |
-|---|---|
-| `Apify: Reddit Search` | URL → `http://reddit-reviews:8001/reddit`; authentication → Header Auth credential `Authorization: Bearer <API_TOKEN>`; remove the `maxTotalChargeUsd` and `timeout` query parameters. Body unchanged. |
-| `Apify: Reddit Comments` | same |
-
-The node timeouts (290 s / 250 s) stay, and `SCRAPE_BUDGET_S` is sized to sit under both. `Assess Vendors` gates on the Apify monthly limit; once Trustpilot and Reddit both leave Apify that gate no longer protects anything.
-
-CI runs on pushes to `main` and on pull requests: unit and Stage 4 node tests, plus a full image build that starts the container and exercises `/health`, token enforcement, the `400` path and a live search (a `503` block is accepted there, since GitHub runners are datacenter IPs).
+Production runs as a single Docker container on the Hostinger VPS that hosts n8n, attached to n8n's Docker network, with nothing published to the host. Deploys are a `git pull` and `docker compose up -d --build`; CI runs on push to `main`. The operational runbook (topology, env, checks and gotchas) is in [deployment.md](docs/deployment.md).

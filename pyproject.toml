@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Self-hosted Reddit scraper: a drop-in HTTP replacement for the Apify actor used by the Stage 4 research workflow"
 readme = "README.md"
 authors = [
-    { name = "Ahmad Abdul Hameed", email = "i220609@nu.edu.pk" }
+    { name = "Haider", email = "haider@ecombench.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [
