@@ -228,8 +228,8 @@ def test_search_all_blocked_raises_vendor_error():
     site = FakeReddit(default=(403, fixture("blocked.html")))
     with pytest.raises(ScrapeBlocked) as e:
         scrape_search(["Gymshark", "Gymshark reviews"], fetcher=site)
-    # retried once per term
-    assert len(site.calls) == 4
+    # page 1 of a term gets ATTEMPTS + 1 rolls at the exit, so three fetches per term
+    assert len(site.calls) == 6
     # must not look like a brand-side error to Stage 4's BRAND_ERROR_RE
     import re
 
@@ -251,7 +251,80 @@ def test_browser_crash_is_retried_then_raised():
 
     with pytest.raises(ScrapeFailed):
         scrape_search(["Gymshark"], fetcher=crashing)
-    assert len(calls) == 2
+    assert len(calls) == 3, "page 1 of a search term is tried ATTEMPTS + 1 times"
+
+
+def test_first_search_page_survives_two_refused_exits():
+    """Measured 19 Sep 2026: 3 of 21 first attempts were refused and every retry on a fresh exit
+    succeeded. Two refusals in a row used to lose the whole term while the call returned 200."""
+    answers = [(403, fixture("blocked.html")), (403, fixture("blocked.html")), (200, fixture("search_hairbrella.html"))]
+    calls = []
+
+    def flaky(url, wait_selector=None):
+        calls.append(url)
+        return answers.pop(0)
+
+    res = scrape_search(["Hairbrella"], max_posts=7, fetcher=flaky, full_bodies=False)
+    assert len(calls) == 3
+    assert len(res.posts) == 7 and res.failed_terms == {}
+    assert res.term_counts == {"Hairbrella": (7, 7)}
+
+
+def test_a_refused_later_page_keeps_what_page_one_found():
+    """Two things at once. Only page 1 gets the extra roll: the budget reserves `_fetch_cost_s()`
+    (priced on ATTEMPTS) before each later page, and a third attempt there would overrun it. And a
+    refused page 2 no longer throws away page 1's posts: it used to fail the whole term, so a term
+    that had 7 real posts in hand reported 0 - and with one term, the whole call was a 503."""
+    page1 = fixture("search_gymshark_reviews.html")
+    next_url = parse_search(page1).next_url
+    calls = []
+
+    def site(url, wait_selector=None):
+        calls.append(url)
+        if url == next_url:
+            return 403, fixture("blocked.html")
+        return 200, page1
+
+    res = scrape_search(["Gymshark reviews"], max_posts=10, fetcher=site, full_bodies=False)
+    assert calls.count(next_url) == scraper.ATTEMPTS
+    assert len(res.posts) == 7 and res.pages_fetched == 1
+    assert res.failed_terms == {}, "a term that returned posts did not fail"
+    assert res.term_counts == {"Gymshark reviews": (7, 7)}
+
+
+def test_search_reports_returned_and_unique_per_term():
+    """`returned` is the term's own quota; `unique` is what survived the merge. The gap is dedup,
+    which is what a raw count below 3 x maxPostsCount is, not a cap."""
+    site = search_site({build_search_url("Hairbrella hats"): (200, fixture("search_hairbrella.html"))})
+    res = scrape_search(["Hairbrella", "Hairbrella hats"], max_posts=7, fetcher=site, full_bodies=False)
+    assert res.term_counts == {"Hairbrella": (7, 7), "Hairbrella hats": (7, 0)}
+    assert len(res.posts) == 7
+    assert res.empty_bodies == sum(1 for p in res.posts if not p.body)
+
+
+def test_a_failed_term_shows_as_zero_in_the_term_counts():
+    site = search_site({build_search_url("Hairbrella"): (403, fixture("blocked.html"))})
+    res = scrape_search(["Hairbrella", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    assert res.term_counts == {"Hairbrella": (0, 0), "Gymshark reviews": (7, 7)}
+
+
+def test_crosspost_body_comes_from_the_original_post():
+    raw = {"name": "t3_x", "title": "Look at this", "selftext": "", "crosspost_parent_list": [{"selftext": "The  original\n text"}]}
+    assert scraper.post_from_raw(raw).body == "The original text"
+    assert scraper.post_from_raw({"name": "t3_y", "selftext": "", "url": "https://i.redd.it/a.jpg"}).body == ""
+
+
+def test_mobile_body_fill_uses_the_crosspost_original(mobile_on, monkeypatch):
+    site = search_site()
+    monkeypatch.setattr(
+        scraper.mobile,
+        "info",
+        lambda ids: {i: {"name": i, "selftext": "", "crosspost_parent_list": [{"selftext": "from the original"}]} for i in ids},
+    )
+    res = scrape_search(["Hairbrella"], max_posts=7, fetcher=site, full_bodies=True)
+    assert res.mobile_posts == 7
+    assert all(p.body == "from the original" and not p.body_is_snippet for p in res.posts)
+    assert res.empty_bodies == 0
 
 
 def test_search_requires_a_term():

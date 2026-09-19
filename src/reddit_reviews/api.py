@@ -194,8 +194,12 @@ async def reddit(req: RedditRequest):
                 "X-Terms-Failed": str(len(res.failed_terms)),
                 "X-Truncated": "true" if res.truncated else "false",
                 "X-Mobile-Posts": str(res.mobile_posts),
+                # returned/unique per term in request order, e.g. `10/10,10/7,10/4`. Numbers only:
+                # header values must be latin-1 and search terms need not be.
+                "X-Term-Counts": ",".join(f"{r}/{u}" for r, u in res.term_counts.values()),
+                "X-Empty-Bodies": str(res.empty_bodies),
             }
-            summary = f"terms={len(req.search_terms)} posts={len(items)} failed_terms={len(res.failed_terms)}"
+            summary = f"terms={len(req.search_terms)} posts={len(items)} failed_terms={len(res.failed_terms)} empty_bodies={res.empty_bodies}"
             seconds = res.seconds
     except ValueError as e:
         counters["bad_request"] += 1

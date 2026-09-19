@@ -139,6 +139,12 @@ class SearchResult:
     # Posts whose body came from the mobile API instead of a browser page fetch. Every one of these
     # is a ~2.8 MB proxied page we did not pay for, so it is the number that shows the hybrid working.
     mobile_posts: int = 0
+    # Per term, in request order: (posts the term returned under its own quota, posts of those that
+    # survived the cross-term merge). Surfaced as X-Term-Counts so a short answer can be read as
+    # dedup, a failed term or Reddit having fewer without opening the log.
+    term_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Posts returned with an empty `body` after the fill phase. Surfaced as X-Empty-Bodies.
+    empty_bodies: int = 0
 
 
 @dataclass
@@ -401,11 +407,26 @@ def _flat(text) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def _selftext(raw: dict) -> str:
+    """The post's own text, or the original's for a crosspost.
+
+    Reddit gives a crosspost an empty `selftext` and carries the original post under
+    `crosspost_parent_list`; the thread page renders that original's text as the body, which is
+    what a reader sees and what the actor returned. Every other empty `selftext` is a link, image,
+    gallery or video post, and empty is correct for those (the actor's docs: "Empty for link posts").
+    """
+    text = _flat(raw.get("selftext"))
+    if text:
+        return text
+    parents = raw.get("crosspost_parent_list") or []
+    return _flat(parents[0].get("selftext")) if parents and isinstance(parents[0], dict) else ""
+
+
 def post_from_raw(raw: dict, search_term: str = "") -> Post:
     return Post(
         id=str(raw.get("name") or ("t3_" + str(raw.get("id") or ""))),
         title=_flat(raw.get("title")),
-        body=_flat(raw.get("selftext")),
+        body=_selftext(raw),
         subreddit=str(raw.get("subreddit") or ""),
         author=str(raw.get("author") or ""),
         created_at=_epoch_iso(raw.get("created_utc")),
@@ -564,6 +585,8 @@ def search_term(
     url: str | None = build_search_url(term, sort, time_filter)
     pages = 0
     truncated = False
+    fresh = -1
+    page_failed = False
     while url and pages < settings.max_search_pages and len(posts) < max_posts:
         # Page 1 is never skipped, however late we already are: returning zero posts would read
         # downstream as "Reddit has nothing for this brand" and trigger the Tavily fallback, which
@@ -572,7 +595,21 @@ def search_term(
             truncated = True
             log.info("%r budget exhausted after %d page(s), returning %d post(s) early", term, pages, len(posts))
             break
-        html = fetch_page(url, fetcher=fetcher)
+        # Page 1 gets one more roll at the exit than later pages. A refused exit answers in seconds,
+        # not FETCH_TIMEOUT_MS, and page 1 is the whole term: lose it and the term contributes
+        # nothing while the call still returns 200. Measured 19 Sep 2026: 3 of 21 first attempts
+        # were refused and every retry on a fresh exit succeeded. Later pages keep ATTEMPTS so the
+        # budget reservation above (`_fetch_cost_s()`, priced on ATTEMPTS) stays honest.
+        try:
+            html = fetch_page(url, fetcher=fetcher, attempts=ATTEMPTS + 1 if pages == 0 else ATTEMPTS)
+        except RedditError as e:
+            if not pages:
+                raise  # nothing collected: the term failed, and the caller decides what that means
+            # A refused later page used to discard the whole term, page 1 included: the exception
+            # left this loop with the posts still in `posts`. Those posts are real; keep them.
+            log.warning("%r page %d failed, keeping the %d post(s) already collected: %s", term, pages + 1, len(posts), e)
+            page_failed = True
+            break
         pages += 1
         page = parse_search(html, term)
         fresh = 0
@@ -582,9 +619,32 @@ def search_term(
             seen.add(p.id)
             posts.append(p)
             fresh += 1
+        log.info(
+            "%r page %d: %d on page, %d new, %d/%d collected, next=%s",
+            term, pages, len(page.posts), fresh, len(posts), max_posts, "yes" if page.next_url else "no",
+        )
+        if pages == 1 and not page.posts:
+            # A 200 that parsed to nothing is either a genuinely empty result or a page Reddit
+            # served instead of results without any block marker. Loud, because downstream reads
+            # it as "Reddit has nothing for this brand".
+            log.warning("%r page 1 parsed to zero posts (title=%r)", term, _title_of(html))
         if fresh == 0:
             break  # an empty or repeating page means the results are exhausted
         url = page.next_url
+    # Why the loop ended, so a short term reads as what it was rather than "Reddit had fewer".
+    if len(posts) >= max_posts:
+        stopped_by = "quota"
+    elif truncated:
+        stopped_by = "budget"
+    elif page_failed:
+        stopped_by = "page_failed"
+    elif fresh == 0:
+        stopped_by = "empty_page"
+    elif not url:
+        stopped_by = "no_next_page"
+    else:
+        stopped_by = "max_pages"
+    log.info("%r requested=%d returned=%d pages=%d stopped_by=%s", term, max_posts, min(len(posts), max_posts), pages, stopped_by)
     return posts[:max_posts], pages, truncated
 
 
@@ -625,18 +685,32 @@ def scrape_search(
     pages = 0
     failed: dict[str, str] = {}
     truncated = False
+    term_counts: dict[str, tuple[int, int]] = {}
     for term in terms:
         out = outcomes[term]
         if isinstance(out, RedditError):
             failed[term] = str(out)
+            term_counts[term] = (0, 0)
             continue
         found, n, term_truncated = out
         pages += n
         truncated = truncated or term_truncated
+        unique = 0
         for p in found:
             if p.id not in seen:
                 seen.add(p.id)
                 posts.append(p)
+                unique += 1
+        term_counts[term] = (len(found), unique)
+    # `returned` is what the term's own quota produced; `unique` is what survived the cross-term
+    # merge. The gap between the two is dedup, not a cap - the merge happens after every term has
+    # taken its full quota.
+    log.info(
+        "search terms (requested %d each): %s -> %d distinct post(s)",
+        max_posts,
+        "; ".join(f"{t!r} returned={r} unique={u}" + (" FAILED" if t in failed else "") for t, (r, u) in term_counts.items()),
+        len(posts),
+    )
 
     if len(failed) == len(terms):
         err = outcomes[terms[0]]
@@ -658,6 +732,9 @@ def scrape_search(
             truncated = truncated or bodies_truncated
         else:
             mobile_posts = done
+    empty_bodies = sum(1 for p in posts if not p.body)
+    snippets = sum(1 for p in posts if p.body_is_snippet)
+    log.info("bodies: %d of %d empty after fill, %d still snippet-only", empty_bodies, len(posts), snippets)
     return SearchResult(
         posts=posts,
         pages_fetched=pages,
@@ -665,6 +742,8 @@ def scrape_search(
         failed_terms=failed,
         truncated=truncated,
         mobile_posts=mobile_posts,
+        term_counts=term_counts,
+        empty_bodies=empty_bodies,
     )
 
 
@@ -694,7 +773,7 @@ def fill_bodies_mobile(posts: list[Post]) -> int | None:
             continue
         # Assigned even when empty. A link or image post has no self text, and the browser path sets
         # an empty body for exactly those, so anything else would make the two routes disagree.
-        post.body = _flat(data.get("selftext"))
+        post.body = _selftext(data)
         post.body_is_snippet = False
         # Reddit's live figures beat the search index's.
         post.score = _int(data.get("score")) or post.score

@@ -123,6 +123,8 @@ One per post in the search response, and one per thread at the head of a comment
 | `X-Threads-Failed` | threads: vendor failures while others succeeded |
 | `X-Truncated` | `true` when `SCRAPE_BUDGET_S` stopped the call with work left |
 | `X-Mobile-Posts`, `X-Mobile-Threads` | bodies and threads the app route served instead of the browser |
+| `X-Term-Counts` | search: `returned/unique` per term in request order, e.g. `10/10,10/7,10/4`. `returned` is what the term produced under its own `maxPostsCount`; `unique` is what survived the cross-term merge. A raw count under 3 × `maxPostsCount` with every term at `10/…` is dedup, not a cap; a `0/0` is a term that failed |
+| `X-Empty-Bodies` | search: posts returned with an empty `body`. Checked 19 Sep 2026 against Reddit directly for 70 such posts: all were image, link, video, gallery or title-only posts, i.e. posts with no text to return |
 
 ## Errors
 

@@ -132,6 +132,20 @@ def test_a_healthy_call_is_not_flagged_as_truncated(client, monkeypatch):
     assert r.headers["X-Truncated"] == "false"
 
 
+def test_search_headers_carry_per_term_counts_and_empty_bodies(client, monkeypatch):
+    """Numbers only, in request order: header values must be latin-1 and search terms need not be."""
+    import dataclasses
+
+    res = dataclasses.replace(canned_search(), term_counts={"Gymshark": (10, 10), "Gymshark café": (10, 3)}, empty_bodies=2)
+    monkeypatch.setattr(api, "scrape_search", lambda *a, **k: res)
+    r = client.post("/reddit", json={"searchTerms": ["Gymshark", "Gymshark café"]})
+    assert r.status_code == 200
+    assert r.headers["X-Term-Counts"] == "10/10,10/3"
+    assert r.headers["X-Empty-Bodies"] == "2"
+    # the body is untouched: same items, same field names
+    assert {"dataType", "title", "body", "communityName", "createdAt", "score", "commentsCount", "postUrl", "parsedId"} <= set(r.json()[0])
+
+
 def test_empty_result_is_200_empty_array(client, monkeypatch):
     monkeypatch.setattr(api, "scrape_search", lambda *a, **k: SearchResult(posts=[], pages_fetched=3, seconds=1.0))
     r = client.post("/reddit", json={"searchTerms": ["nothing"]})
