@@ -735,6 +735,17 @@ def scrape_search(
     empty_bodies = sum(1 for p in posts if not p.body)
     snippets = sum(1 for p in posts if p.body_is_snippet)
     log.info("bodies: %d of %d empty after fill, %d still snippet-only", empty_bodies, len(posts), snippets)
+    # One line per term, after the fill, so the cap question and the body question are answered
+    # side by side without inference: returned_by_source is the term's own quota, after_dedupe is
+    # what the merge kept, empty_body is counted on the posts this term contributed.
+    for term, (returned, unique) in term_counts.items():
+        out = outcomes[term]
+        pages_for_term = 0 if isinstance(out, RedditError) else out[1]
+        empty_for_term = sum(1 for p in posts if p.search_term == term and not p.body)
+        log.info(
+            "term=%r posts_requested=%d posts_returned_by_source=%d posts_after_dedupe=%d pages_fetched=%d posts_with_empty_body=%d%s",
+            term, max_posts, returned, unique, pages_for_term, empty_for_term, " FAILED" if term in failed else "",
+        )
     return SearchResult(
         posts=posts,
         pages_fetched=pages,
