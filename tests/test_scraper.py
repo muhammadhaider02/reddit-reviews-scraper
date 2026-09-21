@@ -11,6 +11,7 @@ from reddit_reviews.scraper import (
     build_search_url,
     iso,
     is_blocked_page,
+    is_reddit_document,
     parse_search,
     parse_thread,
     scrape_search,
@@ -61,6 +62,33 @@ def test_block_page_detected():
     assert is_blocked_page(fixture("blocked.html"))
     assert not is_blocked_page(fixture("search_gymshark_reviews.html"))
     assert not is_blocked_page(fixture("thread_text_post.html"))
+
+
+GATEWAY_PAGE = "<html><head><title>Gateway</title></head><body><h1>Gateway</h1></body></html>"
+
+
+def test_reddit_documents_are_told_from_interstitials():
+    for name in ("search_gymshark_reviews.html", "search_gymshark_reviews_page2.html", "search_hairbrella.html",
+                 "thread_text_post.html", "thread_image_post.html"):
+        assert is_reddit_document(fixture(name)), name
+    assert not is_reddit_document(GATEWAY_PAGE)
+    assert not is_reddit_document("")
+
+
+def test_an_interstitial_served_with_200_is_retried_on_a_fresh_exit():
+    """A proxy's 'Gateway' page came back as HTTP 200 with no block marker and no posts, and the
+    term was recorded as empty with no retry (21 Sep 2026). It is a refusal in all but status."""
+    page1 = fixture("search_gymshark_reviews.html")
+    calls = []
+
+    def site(url, wait_selector=None):
+        calls.append(url)
+        return (200, GATEWAY_PAGE) if len(calls) == 1 else (200, page1)
+
+    res = scrape_search(["Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    assert len(res.posts) == 7 and res.term_counts == {"Gymshark reviews": (7, 7)}
+    assert len(calls) == 2, "the interstitial cost one attempt, the retry got the real page"
+    assert res.failed_terms == {}
 
 
 # --------------------------------------------------------------------------- parsing

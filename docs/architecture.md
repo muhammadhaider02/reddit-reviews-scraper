@@ -124,7 +124,7 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | `MAX_BODY_FETCHES` | `30` | Bodies filled per search call. |
 | `SCRAPE_BUDGET_S` | `200` | Wall-clock budget for one call. Keep under 250 and under `stop_grace_period`. |
 | `MAX_THREADS` | `10` | Thread links read per call, whatever the caller sends. |
-| `RETRY_DELAY_S` | `2` | Pause before the one retry of a refused page. |
+| `RETRY_DELAY_S` | `2` | Pause before the one retry of a refused page. A refusal is a non-200, a page carrying a block marker, or since 21 Sep 2026 a 200 that is not a Reddit document at all (no `redditstatic.com`, no `<shreddit-` element): a proxy's `Gateway` page came back that way and had been read as "no posts". |
 | `MOBILE_ENABLED` | `true` | Kill switch for the app route. Off means the browser does bodies and threads at ~20x the bandwidth. |
 | `MOBILE_DEVICES` | `3` | Devices in flight at once; caps concurrent calls on the route. |
 | `MOBILE_MIN_BUDGET` | `10` | Re-mint when a token's 100-per-10-minutes budget falls this low. |

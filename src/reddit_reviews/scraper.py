@@ -209,6 +209,19 @@ def is_blocked_page(html: str) -> bool:
     return any(m in low for m in BLOCK_MARKERS)
 
 
+def is_reddit_document(html: str) -> bool:
+    """A page Reddit itself rendered, as opposed to something a proxy or CDN put in front of it.
+
+    Measured 21 Sep 2026: a residential exit answered a search with HTTP 200 and a page titled
+    'Gateway' that carried no block marker and no posts. It parsed to zero, the term was recorded as
+    empty (`stopped_by=empty_page`) with no retry, and the brand lost a third of its discovery for
+    that run while the call still returned 200. Every Reddit document, an empty search result
+    included, links redditstatic.com and renders <shreddit-...> elements; an interstitial does
+    neither. A page that fails this is treated like a refusal: retried on a fresh exit."""
+    low = html[:400_000].lower()
+    return "redditstatic.com" in low or "<shreddit-" in low
+
+
 # --------------------------------------------------------------------------- URLs
 
 
@@ -558,8 +571,11 @@ def fetch_page(url: str, fetcher: Fetcher = fetch_html, wait_selector: str | Non
             if status == 404:
                 raise ThreadMissing(f"reddit answered HTTP {status} for {url}")
             if status == 200 and not is_blocked_page(html):
-                return html
-            last_err = ScrapeBlocked(f"reddit refused the request (HTTP {status}), title={_title_of(html)!r}")
+                if is_reddit_document(html):
+                    return html
+                last_err = ScrapeBlocked(f"something other than reddit answered (HTTP 200 interstitial), title={_title_of(html)!r}")
+            else:
+                last_err = ScrapeBlocked(f"reddit refused the request (HTTP {status}), title={_title_of(html)!r}")
         log.warning("attempt %d/%d failed for %s: %s", attempt, attempts, url, last_err)
         if attempt < attempts:
             time.sleep(settings.retry_delay_s)

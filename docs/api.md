@@ -138,7 +138,7 @@ One per post in the search response, and one per thread at the head of a comment
 |---|---|---|
 | `400` | `ValueError` | neither `searchTerms` nor `startUrls`, or nothing usable in them |
 | `401` | | missing or wrong bearer token |
-| `503` | `ScrapeBlocked` | Reddit refused every attempt |
+| `503` | `ScrapeBlocked` | Reddit refused every attempt, or something in front of it (a proxy or CDN interstitial served as HTTP 200) answered every attempt |
 | `503` | `ScrapeFailed` | the browser or network failed on every term or thread |
 | `500` | | anything unexpected |
 
