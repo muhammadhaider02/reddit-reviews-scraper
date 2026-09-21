@@ -39,6 +39,8 @@ Sent verbatim by Stage 4, `proxy` and the comment fields included. The terms are
 
 Honoured: `searchTerms`, `searchSort`, `searchTime`, `maxPostsCount` (per term, so 30 is the ceiling per brand), `includeNSFW`. Everything else is accepted and ignored.
 
+`maxPostsCount` is filled per term *after* the earlier terms' posts are set aside. Stage 4's three terms per brand ("Brand", "Brand product", "Brand reviews") overlap heavily, and until 21 Sep 2026 each term took its 10 on its own and the merge dropped the overlap afterwards, so a brand landed on 20-25 distinct posts with every term reporting 10 (GRIP6 24, Vessel Golf 21, eskiin 21, against Apify's 28-30 from the same queries). Now term 2 pages on, within `MAX_SEARCH_PAGES` and in the same `searchSort` order, until it has 10 posts term 1 did not return, and term 3 does the same against terms 1 and 2. Page 1 of every term is still fetched in parallel; only the decision to page on waits for the earlier terms. A brand with no overlap is unchanged: one page per term.
+
 ### Call 2: `Apify: Reddit Comments`
 
 Fired only when `Sort Reddit Results` produced at least one strong thread with comments; the `IF: Has Strong Threads?` false branch skips it.
@@ -123,7 +125,7 @@ One per post in the search response, and one per thread at the head of a comment
 | `X-Threads-Failed` | threads: vendor failures while others succeeded |
 | `X-Truncated` | `true` when `SCRAPE_BUDGET_S` stopped the call with work left |
 | `X-Mobile-Posts`, `X-Mobile-Threads` | bodies and threads the app route served instead of the browser |
-| `X-Term-Counts` | search: `returned/unique` per term in request order, e.g. `10/10,10/7,10/4`. `returned` is what the term produced under its own `maxPostsCount`; `unique` is what survived the cross-term merge. A raw count under 3 × `maxPostsCount` with every term at `10/…` is dedup, not a cap; a `0/0` is a term that failed |
+| `X-Term-Counts` | search: `raw/unique` per term in request order, e.g. `14/10,28/10,21/8`. `raw` is every post the term's pages produced; `unique` is what the term contributed once the earlier terms' posts were set aside, which is its `maxPostsCount` wherever Reddit had that many. A `unique` under the quota with `raw` well above it is a term that paged to `MAX_SEARCH_PAGES` and still found mostly overlap; a `0/0` is a term that failed |
 | `X-Empty-Bodies` | search: posts returned with an empty `body`. Checked 19 Sep 2026 against Reddit directly for 70 such posts: all were image, link, video, gallery or title-only posts, i.e. posts with no text to return |
 
 ## Errors

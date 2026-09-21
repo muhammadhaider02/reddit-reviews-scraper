@@ -163,6 +163,40 @@ def test_search_stops_at_max_search_pages():
     assert len(res.posts) == 7 and res.pages_fetched == 1
 
 
+def test_a_later_term_pages_past_what_an_earlier_term_returned():
+    """The second term's page 1 is the first term's answer, post for post. It used to return
+    those 7, the merge dropped all of them, and the brand got 7 posts from two terms while both
+    reported a full quota. Now it sets them aside and takes page 2."""
+    page1 = fixture("search_gymshark_reviews.html")
+    site = search_site({build_search_url("Gymshark"): (200, page1)})
+    res = scrape_search(["Gymshark reviews", "Gymshark"], max_posts=7, fetcher=site, full_bodies=False)
+    assert len(res.posts) == 14 and len({p.id for p in res.posts}) == 14
+    assert [p.search_term for p in res.posts] == ["Gymshark reviews"] * 7 + ["Gymshark"] * 7
+    assert res.term_counts == {"Gymshark reviews": (7, 7), "Gymshark": (14, 7)}
+    assert res.pages_fetched == 3, "term 1 one page, term 2 two"
+    assert len(site.calls) == 3
+
+
+def test_backfill_is_a_no_op_without_overlap():
+    site = search_site()
+    res = scrape_search(["Hairbrella", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    assert res.term_counts == {"Hairbrella": (7, 7), "Gymshark reviews": (7, 7)}
+    assert res.pages_fetched == 2 and len(site.calls) == 2
+
+
+def test_backfill_stops_at_max_search_pages():
+    page1 = fixture("search_gymshark_reviews.html")
+    site = search_site({build_search_url("Gymshark"): (200, page1)})
+    before = settings.max_search_pages
+    set_frozen(settings, "max_search_pages", 1)
+    try:
+        res = scrape_search(["Gymshark reviews", "Gymshark"], max_posts=7, fetcher=site, full_bodies=False)
+    finally:
+        set_frozen(settings, "max_search_pages", before)
+    assert res.term_counts == {"Gymshark reviews": (7, 7), "Gymshark": (7, 0)}
+    assert len(res.posts) == 7 and res.failed_terms == {}
+
+
 def test_search_dedupes_across_terms_and_keeps_term_order():
     site = search_site()
     res = scrape_search(["Hairbrella", "Gymshark reviews", "Hairbrella"], max_posts=7, fetcher=site, full_bodies=False)
@@ -292,9 +326,10 @@ def test_a_refused_later_page_keeps_what_page_one_found():
     assert res.term_counts == {"Gymshark reviews": (7, 7)}
 
 
-def test_search_reports_returned_and_unique_per_term():
-    """`returned` is the term's own quota; `unique` is what survived the merge. The gap is dedup,
-    which is what a raw count below 3 x maxPostsCount is, not a cap."""
+def test_search_reports_raw_and_unique_per_term():
+    """`raw` is every post the term's pages produced; `unique` is what it contributed once the
+    earlier terms' posts were set aside. Here the second term's only page is the first term's
+    answer and its cursor leads to a 404, so it contributes nothing and says so."""
     site = search_site({build_search_url("Hairbrella hats"): (200, fixture("search_hairbrella.html"))})
     res = scrape_search(["Hairbrella", "Hairbrella hats"], max_posts=7, fetcher=site, full_bodies=False)
     assert res.term_counts == {"Hairbrella": (7, 7), "Hairbrella hats": (7, 0)}

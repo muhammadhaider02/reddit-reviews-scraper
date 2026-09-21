@@ -25,7 +25,7 @@ Three consequences. A post with an empty `body` cannot pass the brand gate on it
 
 Reddit blocks by IP. Measured 17 Sep 2026 from the VPS: `curl`, Scrapling's Chromium and Camoufox's Firefox all get the same 403 block page for the same URL (`You've been blocked by network security`; 190,240 and 190,292 bytes), while a residential exit gets `200` the same second. Three clients from "no fingerprint" to "full stealth Firefox" treated identically means the block lands before fingerprinting, so a better browser would not help and none was tried.
 
-Reddit's public JSON endpoints (`/search.json`, `/comments/<id>.json`) answer the same 403 to plain HTTP clients and to the stealth browser alike. The server-rendered web pages answer through a residential exit, and they carry the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`). The service reads those with Scrapling's stealth Chromium through the proxy, following the search cursor for up to `MAX_SEARCH_PAGES` pages per term (about 7 posts a page).
+Reddit's public JSON endpoints (`/search.json`, `/comments/<id>.json`) answer the same 403 to plain HTTP clients and to the stealth browser alike. The server-rendered web pages answer through a residential exit, and they carry the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`). The service reads those with Scrapling's stealth Chromium through the proxy, following the search cursor for up to `MAX_SEARCH_PAGES` pages per term (7 or 14 posts a page). A term pages on until it holds `maxPostsCount` posts that no earlier term in the same request returned: page 1 of every term is fetched in parallel, then each term waits for the terms before it to be final before deciding whether it needs page 2. That is what makes three overlapping terms reach ~30 distinct posts instead of ~22 (measured 21 Sep 2026; `docs/api.md` has the numbers).
 
 ## Bodies and comments: Reddit's own app API
 
@@ -119,7 +119,7 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | `MAX_CONCURRENCY` | `3` | Browser fetches in flight across all requests. Sized against `mem_limit`. |
 | `FETCH_TIMEOUT_MS` | `45000` | Per-page browser timeout. |
 | `BLOCK_RESOURCES` | `true` | Block images, fonts, CSS and media in the browser. |
-| `MAX_SEARCH_PAGES` | `3` | Cursor pages followed per search term. |
+| `MAX_SEARCH_PAGES` | `3` | Cursor pages followed per search term, including the pages a later term spends getting past the posts an earlier term already returned. |
 | `FULL_BODIES` | `true` | Fill each found post's full body. Callers can override per call with `fullBodies`. |
 | `MAX_BODY_FETCHES` | `30` | Bodies filled per search call. |
 | `SCRAPE_BUDGET_S` | `200` | Wall-clock budget for one call. Keep under 250 and under `stop_grace_period`. |
