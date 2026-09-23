@@ -256,12 +256,13 @@ class Corroboration:
     product_words: set[str]  # two-word phrases, plus long single words
     domain: str
     phrase: "re.Pattern[str] | None" = None  # the brand written contiguously, first word as given
+    full: "re.Pattern[str] | None" = None  # every significant word capitalised as given: proof anywhere
 
     @classmethod
     def build(cls, brand: str, product_keywords: list[str] | None, primary_product: str | None, domain: str | None) -> "Corroboration | None":
-        words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", brand or "") if w.lower() not in STOPWORDS]
-        if len([w for w in re.findall(r"[A-Za-z0-9]+", brand or "")]) < 2:
-            return None  # one word: distinctive on its own
+        words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'.-]*", brand or "") if w.lower() not in STOPWORDS]
+        if " " not in (brand or "").strip():
+            return None  # one token, "Howdysnax" or "blackmask.products": distinctive on its own
         first = next((w for w in words if len(w) >= 3), "")
         if not first[:1].isupper():
             first = ""
@@ -280,11 +281,15 @@ class Corroboration:
         phrase = None
         if first:
             rest = [w for w in words[words.index(first) + 1:]]
-            phrase = re.compile(r"\b" + re.escape(first) + "".join(r"\s+" + re.escape(w) + r"s?" for w in rest) + r"\b",
-                                re.IGNORECASE if False else 0)
             # the first word keeps its case, the rest may be written any way: "Lyons leather co"
             phrase = re.compile(r"\b" + re.escape(first) + "".join(r"\s+(?i:" + re.escape(w) + r"s?)" for w in rest) + r"\b")
-        return cls(brand_words=words, first_word=first, product_words=vocab, domain=dom, phrase=phrase)
+        full = None
+        caps = [w for w in words if w[:1].isupper()]
+        if len(caps) >= 2 and caps == words:
+            # "Wild Woollys is not a local storefront": every word capitalised as the brand writes
+            # it is the brand, wherever in the sentence it sits.
+            full = re.compile(r"\b" + r"\s+".join(re.escape(w) + "s?" for w in words) + r"\b")
+        return cls(brand_words=words, first_word=first, product_words=vocab, domain=dom, phrase=phrase, full=full)
 
     def holds(self, text: str) -> bool:
         low = re.sub(r"\s+", " ", text.lower())
@@ -293,6 +298,8 @@ class Corroboration:
         for w in self.product_words:
             if re.search(r"\b" + re.escape(w) + r"(s|es)?\b", low):
                 return True
+        if self.full is not None and self.full.search(text):
+            return True
         if self.phrase is not None:
             for m in self.phrase.finditer(text):
                 before = text[: m.start()].rstrip()

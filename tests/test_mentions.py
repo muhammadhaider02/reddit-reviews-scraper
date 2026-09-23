@@ -251,6 +251,15 @@ from reddit_reviews.mentions import Corroboration  # noqa: E402
 def test_one_word_brands_need_no_corroboration():
     assert Corroboration.build("Howdysnax", ["snack box"], "snack box", "howdysnax.com") is None
     assert Corroboration.build("Eskiin", [], "", "") is None
+    assert Corroboration.build("blackmask.products", ["charcoal face mask"], "charcoal face mask", "blackmaskproducts.com") is None
+
+
+def test_the_fully_capitalised_brand_counts_anywhere_in_the_sentence():
+    w = Corroboration.build("Wild Woollys", ["wool clothing", "merino wool"], "wool clothing and knitwear", "wildwoollys.com")
+    assert w.holds("Wild Woollys is not a local storefront but we are a local dyer"), "sentence-initial, but every word capitalised"
+    assert w.holds("Just ordered from Wild Woollys in Victoria.")
+    assert not w.holds("Seven day, wild woolly and wow with Glacier Bay!")
+    assert not w.holds("Wild woolly and fun!")
 
 
 def test_corroboration_vocabulary_excludes_brand_and_stop_words():
