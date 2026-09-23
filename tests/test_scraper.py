@@ -613,6 +613,35 @@ def test_fetch_html_pins_the_scrapling_kwargs(monkeypatch):
     # DNS inside the tunnel, or the container's resolver leaks the egress a proxy exists to hide.
     assert seen["dns_over_https"] is True
 
+    assert seen["timeout"] == settings.fetch_timeout_ms
+
+    # The mentions route fetches on a shorter clock than FETCH_TIMEOUT_MS.
+    scraper.fetch_html("https://www.reddit.com/r/Gymshark/comments/1st816z/", timeout_ms=10_000)
+    assert seen["timeout"] == 10_000
+
+
+def test_fetch_html_gives_up_on_a_busy_gate(monkeypatch):
+    """A fetch that cannot get a browser before its caller's deadline fails fast instead of
+    queueing behind another call's pages and answering after the caller gave up."""
+    import scrapling.fetchers as fetchers
+
+    class FakeFetcher:
+        @classmethod
+        def fetch(cls, url, **kwargs):
+            raise AssertionError("must not fetch")
+
+    monkeypatch.setattr(fetchers, "StealthyFetcher", FakeFetcher)
+    held = [scraper._browser_gate.acquire(blocking=False) for _ in range(settings.max_concurrency)]
+    try:
+        assert all(held)
+        started = time.time()
+        with pytest.raises(ScrapeFailed, match="gate busy"):
+            scraper.fetch_html("https://www.reddit.com/r/Gymshark/", gate_deadline=time.time() + 0.2)
+        assert time.time() - started < 2
+    finally:
+        for _ in held:
+            scraper._browser_gate.release()
+
 
 def test_fetch_html_sends_the_proxy_as_a_dict_on_a_sticky_port(monkeypatch, proxy_value):
     """Scrapling accepts a URL too, but parses it with urlparse, which does no percent-decoding -

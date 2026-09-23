@@ -144,15 +144,49 @@ One per post in the search response, and one per thread at the head of a comment
 
 Stage 4 reads a `503` as a vendor failure (`reddit_request_failed`), which does not burn one of the brand's retries. The messages deliberately never contain `404`, `not found` or `invalid url`, because the workflow's brand-error pattern would.
 
+## `POST /reddit/mentions` (the Tavily fallback)
+
+Workflow 02's `Reddit Fallback Via Web Search` Code node ran one Tavily web search restricted to reddit.com whenever the primary outcome was not `ok` (about 1 brand in 3), and read `results[].title`, `results[].url` and `results[].raw_content || content`. Since 23 Sep 2026 that call goes here. The value Tavily added was finding threads where the brand is named **in a comment**, which the post search misses; this route asks Reddit's own comment search (`/svc/shreddit/search/?type=comments`) through the same browser and proxy as `/reddit`, one page per term in parallel, a second page only while the merged threads are still under `maxResults` and it fits the budget, then fills the post bodies with one app-route call. Measured from the VPS: 2-5 s a page, and for Howdysnax the exact three threads Tavily had found.
+
+**Unauthenticated by default.** A Code node cannot read n8n credentials, and the container has no published ports, so only the docker network reaches it. `MENTIONS_REQUIRE_TOKEN=true` puts the bearer check on this route too (for the day the call moves into an HTTP Request node). `/reddit` is always locked.
+
+Request, what the node has on the item:
+
+| Field | Aliases | Default | Notes |
+|---|---|---|---|
+| `searchTerms` | `search_terms`, `reddit_search_terms` | | list; at most 3 are searched |
+| `query` | `reddit_query`, `q` | | the same terms joined with ` \| `, split server-side when `searchTerms` is empty |
+| `maxResults` | `max_results` | `15` | threads, 1-25 |
+| `includeNSFW` | `include_nsfw` | `false` | |
+
+Response, Tavily's envelope:
+
+```json
+{ "query": "Howdysnax | Howdysnax reviews", "response_time": 8.4,
+  "results": [ { "title": "Does anyone else wish there were savory protein bars?",
+                 "url": "https://www.reddit.com/r/Protein/comments/1tyuc7l/",
+                 "content": "Search for Howdy (authentic South African droëwors) You can find it on Amazon or howdysnax.com ...",
+                 "raw_content": "<matching comments, best first>\n\n<post body>",
+                 "subreddit": "Protein", "post_id": "t3_1tyuc7l", "created_at": "2026-06-08T15:52:31.312Z", "score": 1,
+                 "post_score": 51, "post_comments": 26, "body_filled": true,
+                 "matched_comments": [ { "id": "t1_oqgy3w4", "url": "...", "text": "...", "score": 1, "created_at": "...", "term": "Howdysnax" } ] } ] }
+```
+
+The node reads `title`, `url` and `raw_content || content` and slices the text to 900 characters, so `raw_content` leads with the matching comments and puts the post body after them. Everything from `subreddit` on is **not read by the node**: it is there for logs, for the acceptance comparison, and for a future where rescued threads carry real metadata, which changes research output and needs the owner's sign-off (tavily.md). Unlike Tavily's `raw_content`, there is no page chrome in the text, which is what produced Tavily's false brand matches.
+
+Threads come in term order, then Reddit's relevance order; the first term to find a thread owns it and every term's matching comments are kept on it. An empty `results` is a `200` and means "searched, found nothing"; a `503` or `500` carries the error envelope below and no `results` key, which the node counts as an error. Headers: `X-Scrape-Seconds`, `X-Pages-Fetched`, `X-Terms-Failed`, `X-Truncated`, `X-Mobile-Posts` (bodies filled), and `X-Term-Counts` as `hits/threads` per term (comment hits the term's pages produced, threads it was first to find).
+
+Budget: the node gives the call 45 s. `MENTIONS_BUDGET_S` (30) is the wall clock, `MENTIONS_FETCH_TIMEOUT_MS` (10000) the per-page browser timeout, `MENTIONS_MAX_PAGES` (2) the cursor pages per term. Page 1 of every term is never skipped; a browser that cannot be had before the deadline fails the term fast (`503` if every term fails) rather than answering after the node gave up.
+
 ## `GET /health`
 
 Unauthenticated, for uptime checks.
 
 ```json
 {
-  "status": "ok", "version": "0.1.0", "auth": true, "proxy": true, "max_concurrency": 3,
+  "status": "ok", "version": "0.1.0", "auth": true, "proxy": true, "max_concurrency": 3, "mentions_auth": false,
   "mobile": { "enabled": true, "mints": 2, "calls": 145, "bytes": 1237581, "rate_limited": 0, "unauthorized": 0, "blocked": 0, "errors": 0 },
-  "requests": 48, "search": 26, "threads": 22, "ok": 45, "empty": 0, "partial": 3,
+  "requests": 57, "search": 26, "threads": 22, "mentions": 9, "ok": 54, "empty": 0, "partial": 3,
   "blocked": 0, "failed": 0, "bad_request": 0, "truncated": 0, "in_flight": 0
 }
 ```

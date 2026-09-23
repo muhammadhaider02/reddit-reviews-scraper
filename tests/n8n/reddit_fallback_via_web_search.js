@@ -1,0 +1,188 @@
+// ===================================================================
+// THE RESEARCH FALLBACK (built 31 Aug) - TIER 3'S ROUTE, AS A SAFETY NET
+// ===================================================================
+// WHAT THIS EXISTS FOR. When the Apify Reddit scraper comes back with nothing,
+// Parse Report marks the brand Failed, it is retried up to three times AGAINST
+// THE SAME EMPTY SOURCE, and then Abandoned forever. Retrying an empty source
+// returns the same emptiness, so the retries are pure cost and the brand is lost
+// even when it has plenty of customer discussion findable another way.
+//
+// This node gives that brand a SECOND ROUTE before any of that happens: the same
+// Tavily web search, restricted to reddit.com, that the LinkedIn lane has used
+// successfully since August. It is the Tier 3 approach, applied to the lane that
+// never had it.
+//
+// *** WHY IT IS ONE NODE IN THE MAIN CHAIN AND NOT A NEW BRANCH ***
+// Cold V2 was broken on 19 Aug by adding a parallel path without removing the old
+// direct connection: leads ran both routes at once and copy was written with no
+// research behind it. The canvas looked right and validation flagged nothing.
+// This node sits INLINE between the Reddit step and Trustpilot. There is one path
+// in and one path out, so that failure is structurally impossible here.
+// It also follows the pattern already proven in this workflow by
+// `Resolve Ads Via Facebook Page`, which makes its own HTTP calls from inside a
+// Code node rather than adding vendor nodes and branches.
+//
+// *** IT ONLY FIRES WHEN THE PRIMARY SOURCE FOUND NOTHING ***
+// If Apify returned usable posts this node is a pass-through and costs zero. So
+// it never competes with the primary source and never doubles up spend on a brand
+// that was already fine. The only brands it costs anything on are the ones we
+// were previously throwing away.
+//
+// *** WHAT IT MUST NEVER DO: INVENT METADATA ***
+// Apify returns subreddit, post age, comment count and vote score. Tavily returns
+// a page title and an extract, and NONE of that metadata. Filling those fields
+// with plausible values would put fabricated evidence into a bundle that is reused
+// for every touch for months. Every fallback post therefore carries its
+// provenance IN THE TEXT the model reads, and its metadata fields are left empty
+// rather than guessed.
+//
+// *** THE BRAND-MENTION GATE STILL APPLIES ***
+// `Sort Reddit Results` hard-rejects any post that never names the brand, because
+// a Super Mario thread once scored 4 on Colorful Standard purely on engagement.
+// A web search has no such filter of its own and drifts more, not less, so the
+// same gate is applied here to the extracts. A result that does not name the
+// brand is dropped, exactly as it would be on the primary route.
+const b = $input.first().json;
+
+// ---- REQUEST COUNTERS (12 Sep 2026, telemetry only) ------------------------
+// Tavily is called ONLY from inside this node, so run telemetry - which counts
+// the named HTTP nodes - never recorded a single Tavily request.
+let tavilyCalls = 0;
+let tavilyErrors = 0;
+
+// Only rescue a brand the primary source genuinely failed on. 'ok' means Apify
+// found usable discussion and there is nothing to rescue.
+const primaryOk = b.reddit_outcome === 'ok';
+if (primaryOk) {
+  return [{ json: { ...b, reddit_fallback_used: false, reddit_fallback_reason: 'primary reddit source returned usable data', tavily_calls: 0, tavily_errors: 0 } }];
+}
+
+const query = String(b.reddit_query || '').trim();
+if (!query) {
+  return [{ json: { ...b, reddit_fallback_used: false, reddit_fallback_reason: 'no reddit_query available to search with', tavily_calls: 0, tavily_errors: 0 } }];
+}
+
+// Same brand-match tokens the primary sorter uses, so the two routes apply an
+// identical relevance standard.
+const tokens = (b.brand_match_tokens || []).map(t => String(t || '').toLowerCase()).filter(Boolean);
+const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+const tight = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const namesBrand = (txt) => {
+  const t = norm(txt);
+  const tt = tight(txt);
+  for (const tok of tokens) {
+    const nt = norm(tok).trim();
+    const ntt = tight(tok);
+    if (!nt) continue;
+    if (nt.length >= 3 && t.includes(nt)) return true;
+    if (ntt && ntt.length >= 3 && tt.includes(ntt)) return true;
+  }
+  return false;
+};
+
+let res = null;
+let err = '';
+try {
+  tavilyCalls++;
+  res = await this.helpers.httpRequest({
+    method: 'POST',
+    // In-house comment search (reddit-reviews, POST /reddit/mentions), 23 Sep 2026. Same shape
+    // Tavily answered with: { results: [{ title, url, content, raw_content }] }. Unauthenticated
+    // by design: a Code node cannot read n8n credentials, the container has no published ports,
+    // and MENTIONS_REQUIRE_TOKEN on the service is the switch if that ever changes. The
+    // `tavily_calls` / `tavily_errors` keys below keep their names because Build Run Telemetry
+    // sums them by name; they now count calls to this service.
+    url: 'http://reddit-reviews:8001/reddit/mentions',
+    timeout: 45000,
+    json: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: {
+      searchTerms: Array.isArray(b.reddit_search_terms) ? b.reddit_search_terms : [],
+      query: query,
+      maxResults: 15
+    }
+  });
+} catch (e) {
+  err = String((e && e.message) || e).slice(0, 180);
+}
+
+// A search that returned nothing is a SUCCESSFUL call with no results, not a
+// failed request. Only a throw counts as an error.
+tavilyErrors = err ? 1 : 0;
+
+const results = (res && Array.isArray(res.results)) ? res.results : [];
+
+const PROVENANCE = '[WEB SEARCH EXTRACT, not a scraped post. Subreddit, post age, comment count and vote score are NOT AVAILABLE for this item, so never cite or imply any of them.] ';
+
+const rescued = [];
+let droppedNoBrandMention = 0;
+
+for (const r of results) {
+  const title = String((r && r.title) || '').replace(/\s+/g, ' ').trim();
+  const body = String((r && (r.raw_content || r.content)) || '').replace(/\s+/g, ' ').trim();
+  if (!title && !body) continue;
+
+  // The same hard gate as the primary route. Web search drifts off-brand more
+  // readily than a scraper, so this matters more here, not less.
+  if (!namesBrand(title + ' ' + body)) { droppedNoBrandMention++; continue; }
+
+  rescued.push({
+    id: '',
+    relevance: 0,
+    strong: false,
+    title: (PROVENANCE + title).slice(0, 400),
+    text: body.slice(0, 900),
+    // Left empty on purpose. These are the fields Tavily does not return, and a
+    // plausible-looking value here would be fabricated evidence.
+    score_upvotes: 0,
+    num_comments: 0,
+    subreddit: 'web-search-extract',
+    age_days: null,
+    url: String((r && r.url) || '')
+  });
+}
+
+const got = rescued.length > 0;
+
+let reason;
+if (err) reason = 'tavily request failed: ' + err;
+else if (!results.length) reason = 'tavily returned no reddit results for this brand';
+else if (!got) reason = 'tavily returned ' + results.length + ' results but none named the brand, so all were dropped by the brand-mention gate';
+else reason = 'rescued ' + rescued.length + ' of ' + results.length + ' web search extracts';
+
+if (!got) {
+  return [{ json: {
+    ...b,
+    reddit_fallback_used: true,
+    reddit_fallback_count: 0,
+    reddit_fallback_dropped_no_brand_mention: droppedNoBrandMention,
+    reddit_fallback_error: err,
+    reddit_fallback_reason: reason,
+    tavily_calls: tavilyCalls,
+    tavily_errors: tavilyErrors
+  } }];
+}
+
+// Fallback posts are APPENDED to whatever the primary route did find, never
+// substituted for it. A thin-but-real scraped post is better evidence than a
+// search extract, so it keeps its place at the front.
+const existingPosts = Array.isArray(b.reddit_posts) ? b.reddit_posts : [];
+const mergedPosts = existingPosts.concat(rescued).slice(0, 20);
+
+return [{ json: {
+  ...b,
+  reddit_posts: mergedPosts,
+  reddit_post_count: mergedPosts.length,
+  // A DISTINCT OUTCOME, never plain 'ok'. Downstream and anyone reading an
+  // execution must be able to tell a scraped brief from a rescued one, and the
+  // report prompt is handed this string directly.
+  reddit_outcome: 'ok_web_search_fallback',
+  reddit_has_data: true,
+  reddit_fallback_used: true,
+  reddit_fallback_count: rescued.length,
+  reddit_fallback_dropped_no_brand_mention: droppedNoBrandMention,
+  reddit_fallback_error: '',
+  reddit_fallback_reason: reason,
+  tavily_calls: tavilyCalls,
+  tavily_errors: tavilyErrors
+} }];

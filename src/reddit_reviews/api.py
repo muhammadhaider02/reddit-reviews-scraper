@@ -3,6 +3,10 @@
 POST /reddit  -> JSON array of dataset items, same names Stage 4's Code nodes read from Apify
                  body with `searchTerms` -> post search   (replaces `Apify: Reddit Search`)
                  body with `startUrls`   -> thread + comments (replaces `Apify: Reddit Comments`)
+POST /reddit/mentions -> {query, results: [{title, url, content, raw_content, ...}], response_time}
+                 threads where a COMMENT names the brand, in Tavily's shape
+                 (replaces the Tavily call inside `Reddit Fallback Via Web Search`; open by
+                 default because a Code node cannot carry a credential, see MENTIONS_REQUIRE_TOKEN)
 GET  /health  -> counters
 
 Error contract, matched to Stage 4:
@@ -26,13 +30,14 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
 from .config import settings
-from .mapping import comment_item, post_item
+from .mapping import comment_item, mention_item, post_item
+from .mentions import search_mentions
 from .mobile import counters as mobile_counters
 from .scraper import RedditError, scrape_search, scrape_threads
 
 log = logging.getLogger("reddit_reviews.api")
 
-counters = {"requests": 0, "search": 0, "threads": 0, "ok": 0, "empty": 0, "partial": 0, "blocked": 0, "failed": 0, "bad_request": 0, "truncated": 0, "in_flight": 0}
+counters = {"requests": 0, "search": 0, "threads": 0, "mentions": 0, "ok": 0, "empty": 0, "partial": 0, "blocked": 0, "failed": 0, "bad_request": 0, "truncated": 0, "in_flight": 0}
 
 
 def _log_egress() -> None:
@@ -143,6 +148,39 @@ def require_token(authorization: Annotated[str | None, Header()] = None) -> None
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
 
+def require_mentions_token(authorization: Annotated[str | None, Header()] = None) -> None:
+    # Off by default: the caller is a Code node, which cannot read n8n credentials, and the only
+    # way to the container is the docker network. See Settings.mentions_require_token.
+    if settings.mentions_require_token:
+        require_token(authorization)
+
+
+class MentionsRequest(BaseModel):
+    """What `Reddit Fallback Via Web Search` has on the item: `reddit_search_terms` (up to three
+    terms) and `reddit_query` (the same terms joined with ' | ', which is what Tavily received)."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    search_terms: list[str] = Field(default_factory=list, validation_alias=AliasChoices("searchTerms", "search_terms", "reddit_search_terms"))
+    query: str = Field(default="", validation_alias=AliasChoices("query", "reddit_query", "q"))
+    max_results: int = Field(default=15, ge=1, le=25, validation_alias=AliasChoices("maxResults", "max_results"))
+    include_nsfw: bool = Field(default=False, validation_alias=AliasChoices("includeNSFW", "include_nsfw"))
+
+    @field_validator("search_terms", mode="before")
+    @classmethod
+    def _coerce_terms(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        return [str(t).strip() for t in v if str(t or "").strip()]
+
+    def terms(self) -> list[str]:
+        if self.search_terms:
+            return self.search_terms
+        return [t.strip() for t in str(self.query or "").split("|") if t.strip()]
+
+
 def _error_body(exc: Exception, status: int) -> dict:
     return {"error": {"type": type(exc).__name__, "status": status, "message": str(exc), "description": str(exc)}}
 
@@ -224,6 +262,54 @@ async def reddit(req: RedditRequest):
     return JSONResponse(content=items, headers=headers)
 
 
+@app.post("/reddit/mentions", dependencies=[Depends(require_mentions_token)])
+async def reddit_mentions(req: MentionsRequest):
+    counters["requests"] += 1
+    counters["mentions"] += 1
+    terms = req.terms()
+    if not terms:
+        counters["bad_request"] += 1
+        err = ValueError("request must include `searchTerms` or `query`")
+        return JSONResponse(status_code=400, content=_error_body(err, 400))
+    counters["in_flight"] += 1
+    try:
+        res = await asyncio.to_thread(search_mentions, terms, req.max_results, req.include_nsfw)
+    except ValueError as e:
+        counters["bad_request"] += 1
+        return JSONResponse(status_code=400, content=_error_body(e, 400))
+    except RedditError as e:
+        counters["blocked" if e.status == 503 else "failed"] += 1
+        log.warning("%s mentions -> %s: %s", e.status, type(e).__name__, e)
+        return JSONResponse(status_code=e.status, content=_error_body(e, e.status))
+    except Exception as e:  # noqa: BLE001
+        counters["failed"] += 1
+        log.exception("unexpected failure in mentions")
+        return JSONResponse(status_code=500, content=_error_body(e, 500))
+    finally:
+        counters["in_flight"] -= 1
+
+    results = [mention_item(t) for t in res.threads]
+    partial = bool(res.failed_terms)
+    counters["partial" if partial else "ok" if results else "empty"] += 1
+    if res.truncated:
+        counters["truncated"] += 1
+    headers = {
+        "X-Scrape-Seconds": str(res.seconds),
+        "X-Pages-Fetched": str(res.pages_fetched),
+        "X-Terms-Failed": str(len(res.failed_terms)),
+        "X-Truncated": "true" if res.truncated else "false",
+        "X-Mobile-Posts": str(res.bodies_filled),
+        # hits/threads per term in request order: comment hits the term's pages produced, and the
+        # threads it was the first to find. Numbers only, as on /reddit.
+        "X-Term-Counts": ",".join(f"{h}/{n}" for h, n in res.term_counts.values()),
+    }
+    log.info(
+        "ok mentions terms=%d threads=%d comments=%d bodies=%d failed_terms=%d %.1fs",
+        len(terms), len(results), sum(len(r["matched_comments"]) for r in results), res.bodies_filled, len(res.failed_terms), res.seconds,
+    )
+    return JSONResponse(content={"query": " | ".join(terms), "results": results, "response_time": res.seconds}, headers=headers)
+
+
 @app.get("/health")
 async def health():
     return {
@@ -232,6 +318,7 @@ async def health():
         "auth": bool(settings.api_token),
         "proxy": bool(settings.proxy),
         "max_concurrency": settings.max_concurrency,
+        "mentions_auth": settings.mentions_require_token,
         # The mobile route is an optimisation in front of a working browser path, so its failures are
         # logged and swallowed rather than surfaced as errors. These counters are the only way to see
         # it stop working: `blocked` climbing, or `calls` flat while requests keep arriving, means

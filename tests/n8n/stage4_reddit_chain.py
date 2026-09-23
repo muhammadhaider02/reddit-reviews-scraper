@@ -1,7 +1,8 @@
 """Replay Stage 4's Reddit chain against a running reddit-reviews server, locally.
 
   Apify: Reddit Search -> Sort Reddit Results -> IF: Has Strong Threads? -> Apify: Reddit Comments
-  -> Fetch Reddit Comments
+  -> Fetch Reddit Comments -> Reddit Fallback Via Web Search (POST /reddit/mentions when the outcome
+  is not 'ok', the leg that replaced Tavily)
 
 The HTTP bodies are the ones Stage 4 sends; the two Code nodes run verbatim through run_node.mjs.
 n8n is read-only, so this is the end-to-end check before anyone edits the workflow.
@@ -51,6 +52,7 @@ def main() -> int:
     ap.add_argument("--url", default="http://127.0.0.1:8001")
     ap.add_argument("--token", default=os.environ.get("API_TOKEN", ""))
     ap.add_argument("--out", help="directory to keep every intermediate JSON in")
+    ap.add_argument("--force-fallback", action="store_true", help="run the fallback leg even when the primary outcome is ok")
     args = ap.parse_args()
 
     workdir = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="stage4_"))
@@ -98,6 +100,23 @@ def main() -> int:
         fetch_out = node("comments", sort_out, citems, workdir)
         (workdir / "fetch_output.json").write_text(json.dumps(fetch_out, indent=2), encoding="utf-8")
         report["fetch"] = {k: fetch_out.get(k) for k in ("reddit_outcome", "reddit_has_data", "reddit_post_count", "reddit_comment_count", "reddit_rejected_comments", "reddit_comment_fetch_failed", "reddit_threads_read", "reddit_subreddits")}
+
+        if fetch_out.get("reddit_outcome") != "ok" or args.force_fallback:
+            # The fallback node's own call, unauthenticated by design (see MENTIONS_REQUIRE_TOKEN).
+            fallback_item = {**upstream, **fetch_out}
+            with httpx.Client() as open_client:
+                status, mentions, secs = call(open_client, f"{args.url}/reddit/mentions", {"searchTerms": args.terms, "query": upstream["reddit_query"], "maxResults": 15}, 45)
+            (workdir / "mentions_response.json").write_text(json.dumps(mentions, indent=2), encoding="utf-8")
+            payload = mentions if status == 200 else {"__status": status, **(mentions if isinstance(mentions, dict) else {})}
+            fb_out = node("fallback", fallback_item, payload, workdir)
+            (workdir / "fallback_output.json").write_text(json.dumps(fb_out, indent=2), encoding="utf-8")
+            results = mentions.get("results", []) if isinstance(mentions, dict) else []
+            report["fallback"] = {
+                "status": status, "seconds": secs, "within_45s": secs <= 45,
+                "results": len(results), "threads": [r.get("url") for r in results],
+                "kept": fb_out.get("reddit_fallback_count"), "dropped_no_brand_mention": fb_out.get("reddit_fallback_dropped_no_brand_mention"),
+                "outcome": fb_out.get("reddit_outcome"), "reason": fb_out.get("reddit_fallback_reason"),
+            }
 
     report["workdir"] = str(workdir)
     print(json.dumps(report, indent=2))

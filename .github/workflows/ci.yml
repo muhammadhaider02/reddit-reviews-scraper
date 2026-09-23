@@ -57,6 +57,13 @@ jobs:
             -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' -d '{"maxPostsCount":10}')
           test "$code" = "400"
 
+      # The fallback route is open (a Code node calls it) and validated: no token, no terms -> 400, not 401.
+      - name: Mentions route is open and validated
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8001/reddit/mentions \
+            -H 'Content-Type: application/json' -d '{}')
+          test "$code" = "400"
+
       # GitHub runners are datacenter IPs, which Reddit usually blocks. A 503 here proves the block is
       # reported as a vendor failure; a 200 proves the scrape. Anything else fails the job.
       - name: Live search through the container

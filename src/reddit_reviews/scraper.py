@@ -234,6 +234,16 @@ def build_search_url(term: str, sort: str = "relevance", time_filter: str = "all
     return BASE + SEARCH_PATH + "?" + urlencode(params)
 
 
+def build_comment_search_url(term: str, sort: str = "relevance", time_filter: str = "all") -> str:
+    """Reddit's comment search: the same partial as the post search with `type=comments`. Each
+    result is a comment that matches the term, with its thread; this is how a brand named only
+    in a comment is found (mentions.py)."""
+    sort = sort.lower() if sort and sort.lower() in SORTS else "relevance"
+    time_filter = time_filter.lower() if time_filter and time_filter.lower() in TIMES else "all"
+    params = {"q": term, "type": "comments", "sort": sort, "t": time_filter, "disableSpellCorrection": "true"}
+    return BASE + SEARCH_PATH + "?" + urlencode(params)
+
+
 def thread_url(raw: str) -> str:
     """Normalise any thread link (www/old/new reddit, with or without a slug or comment id) to its canonical
     www.reddit.com page. Raises ValueError for anything that is not a thread."""
@@ -496,15 +506,16 @@ from .proxy import (  # noqa: F401
 )
 
 
-def _fetch_cost_s(attempts: int = ATTEMPTS) -> float:
+def _fetch_cost_s(attempts: int = ATTEMPTS, timeout_ms: int | None = None) -> float:
     """Worst case wall clock for one fetch_page call: every attempt times out, plus our pauses.
 
     Callers use this to ask "is there room for a whole fetch" before starting one, rather than
     "is the deadline already past". The difference matters: a fetch begun just under the deadline
     overruns it by its entire cost, which is how a 200s budget turns into a 245s response. Takes
     `attempts` because the three call paths differ - fill_bodies passes 1, the others use ATTEMPTS.
+    `timeout_ms` for a route that fetches on a shorter clock than FETCH_TIMEOUT_MS (mentions).
     """
-    return attempts * (settings.fetch_timeout_ms / 1000) + (attempts - 1) * settings.retry_delay_s
+    return attempts * ((timeout_ms or settings.fetch_timeout_ms) / 1000) + (attempts - 1) * settings.retry_delay_s
 
 
 def _html_of(page) -> str:
@@ -515,8 +526,19 @@ def _html_of(page) -> str:
     return ""
 
 
-def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
-    """One stealth-browser fetch. Returns (status, html). Raises ScrapeFailed on browser/network errors."""
+def fetch_html(
+    url: str,
+    wait_selector: str | None = None,
+    *,
+    timeout_ms: int | None = None,
+    gate_deadline: float | None = None,
+) -> tuple[int, str]:
+    """One stealth-browser fetch. Returns (status, html). Raises ScrapeFailed on browser/network errors.
+
+    `timeout_ms` overrides FETCH_TIMEOUT_MS for routes on a shorter clock. `gate_deadline` is the
+    wall-clock moment past which waiting for a free browser is pointless: instead of queueing
+    behind another call's pages and answering long after the caller gave up, the fetch fails
+    fast as ScrapeFailed. Both are keyword-only so the two-argument `Fetcher` shape stays."""
     from scrapling.fetchers import StealthyFetcher
 
     kwargs = dict(
@@ -533,7 +555,7 @@ def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
         # Resolve DNS inside the proxy tunnel. Without it Chromium resolves reddit.com against the
         # container's resolver, which leaks the real egress around a proxy that exists to hide it.
         dns_over_https=True,
-        timeout=settings.fetch_timeout_ms,
+        timeout=timeout_ms or settings.fetch_timeout_ms,
     )
     # Removed 2026-09-17: humanize / os_randomize / geoip. They are Camoufox-era (scrapling 0.2.x)
     # arguments that do not exist in 0.4.15 - its msgspec validator absorbs unknown keys silently,
@@ -544,17 +566,25 @@ def fetch_html(url: str, wait_selector: str | None = None) -> tuple[int, str]:
     # One sticky exit per fetch, held only while this browser lives. Because fetch_page calls the
     # fetcher once per attempt, a retry automatically lands on a DIFFERENT exit - which is the whole
     # point: Reddit refuses some residential exits outright, and waiting never changes that verdict.
-    with _port_pool.lease() as port, _browser_gate:
-        proxy = proxy_config(port)
-        if proxy:
-            kwargs["proxy"] = proxy
-        try:
-            page = StealthyFetcher.fetch(url, **kwargs)
-        except Exception as e:  # noqa: BLE001 - anything from the browser stack is a vendor failure
-            # The port, never the credential: logging the proxy dict would put the password in the
-            # container log and in every error the API returns.
-            via = f" (exit port {port})" if proxy and port else ""
-            raise ScrapeFailed(f"browser fetch failed{via}: {type(e).__name__}: {e}"[:300]) from e
+    # The gate first, then the port: a fetch queued on the gate should not sit on a sticky exit
+    # it is not using.
+    wait = None if gate_deadline is None else max(0.0, gate_deadline - time.time())
+    if not _browser_gate.acquire(timeout=wait):
+        raise ScrapeFailed(f"browser gate busy, gave up after {wait:.0f}s without fetching")
+    try:
+        with _port_pool.lease() as port:
+            proxy = proxy_config(port)
+            if proxy:
+                kwargs["proxy"] = proxy
+            try:
+                page = StealthyFetcher.fetch(url, **kwargs)
+            except Exception as e:  # noqa: BLE001 - anything from the browser stack is a vendor failure
+                # The port, never the credential: logging the proxy dict would put the password in the
+                # container log and in every error the API returns.
+                via = f" (exit port {port})" if proxy and port else ""
+                raise ScrapeFailed(f"browser fetch failed{via}: {type(e).__name__}: {e}"[:300]) from e
+    finally:
+        _browser_gate.release()
     log.debug("fetched %s via exit port %s", url, port if proxy else "direct")
     return int(page.status), _html_of(page)
 

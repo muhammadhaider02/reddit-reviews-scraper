@@ -17,7 +17,7 @@ What the workflow does with the rows decides most of the design here:
 
 - **`Sort Reddit Results`** drops posts from rep, dupe and coupon subreddits and posts whose title reads as a listing, then requires a brand token in the title or body. Survivors are scored on title hits, review intent, age and comment count; score 3 keeps, score 4 with a title hit is *strong*. Up to 8 strong posts with comments become the comment targets.
 - **`Fetch Reddit Comments`** drops `[removed]`, `[deleted]`, comments under 6 words and comments older than 5 years, flags the ones that name the brand and keeps up to 200.
-- The **outcome** it sets is the field that judges a scraper: `request_failed` (the search call errored), `no_results` (zero raw posts), `all_irrelevant` (posts, none survived), `thin` (no strong post, or fewer than 8 kept posts plus comments), `ok`. Empty or thin sends the brand to a Tavily web-search fallback.
+- The **outcome** it sets is the field that judges a scraper: `request_failed` (the search call errored), `no_results` (zero raw posts), `all_irrelevant` (posts, none survived), `thin` (no strong post, or fewer than 8 kept posts plus comments), `ok`. Empty or thin sends the brand to the comment-search fallback (`POST /reddit/mentions`, below), which replaced the Tavily web search on 23 Sep 2026.
 
 Three consequences. A post with an empty `body` cannot pass the brand gate on its body, so bodies must be full text, not the search snippet. An error must arrive as an object with `error` and no `dataType`, because that is what the failure detection looks for. And a call that returns zero posts because it ran out of time is indistinguishable downstream from a brand nobody discusses, which is why the time budget below never skips the first page.
 
@@ -58,6 +58,14 @@ The app's search (`oauth.reddit.com/search`) is a different index, not a cheaper
 | Proxy cost, 103 brands | $0.54 | $0.00 |
 
 The app index finds threads that merely mention a brand; the web index finds threads about it, which is where the quotable comments are. The route was removed on 19 Sep 2026. `MOBILE_ENABLED=false` still falls everything back to the browser.
+
+## Comment search: the fallback
+
+When the outcome above is not `ok`, workflow 02's `Reddit Fallback Via Web Search` node gives the brand a second route before it is marked Failed. Until 23 Sep 2026 that was one Tavily web search restricted to reddit.com (about 1 brand in 3, 12-15 s, a key hardcoded in the node). What Tavily actually contributed was threads where the brand is named **in a comment**: the post search matches titles and bodies, and a brand that only ever comes up in replies ("You can find it on howdysnax.com") never surfaces there.
+
+Reddit's own comment search is the same server-rendered partial as the post search with `type=comments`, fetched through the same browser, proxy pool and gate. Every card carries the matching comment's text, the post title, both ids, the subreddit, the comment's time and votes, and the post's counter row. `mentions.py` runs the three terms in parallel, one page each, follows a term's cursor only while the merged threads are still under `maxResults` and a fetch plus the body fill fit inside `MENTIONS_BUDGET_S`, merges by thread (first term to find it owns it, every term's comments are kept), then fills the post bodies with one `/api/info` call bounded by whatever time is left. Measured from the VPS: 2-5 s a page, ~10 s a brand, and for Howdysnax the exact three threads Tavily had found. The partial carries no page chrome, which is what had produced Tavily's false brand matches ("Related Answers" naming Safe Hero on a Monster Hunter thread).
+
+The response keeps Tavily's shape (`results[].title / url / content / raw_content`) so the node's gate, mapping and outcome strings are unchanged, and `raw_content` leads with the matching comments because the node keeps the first 900 characters. The route is open by default (`MENTIONS_REQUIRE_TOKEN`): a Code node cannot carry a credential and nothing outside the docker network can reach the container.
 
 ## The proxy
 
@@ -100,6 +108,7 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | Module | Role |
 |---|---|
 | `scraper.py` | URLs, fetch through the browser, page parsing, the search and thread orchestration and their budgets |
+| `mentions.py` | the comment-search fallback: comment-card parsing, the per-term paging, the merge, the one-call body fill |
 | `mobile.py` | the app API transport: device identity, token minting, `/api/info`, `/comments`, pacing |
 | `proxy.py` | credential parsing, the rotating-gateway guard, the sticky-port pool |
 | `mapping.py` | output rows in the Apify actor's field names |
@@ -125,6 +134,10 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | `SCRAPE_BUDGET_S` | `200` | Wall-clock budget for one call. Keep under 250 and under `stop_grace_period`. |
 | `MAX_THREADS` | `10` | Thread links read per call, whatever the caller sends. |
 | `RETRY_DELAY_S` | `2` | Pause before the one retry of a refused page. A refusal is a non-200, a page carrying a block marker, or since 21 Sep 2026 a 200 that is not a Reddit document at all (no `redditstatic.com`, no `<shreddit-` element): a proxy's `Gateway` page came back that way and had been read as "no posts". |
+| `MENTIONS_BUDGET_S` | `30` | Wall clock for one `/reddit/mentions` call; the node gives it 45 s. |
+| `MENTIONS_FETCH_TIMEOUT_MS` | `10000` | Per-page browser timeout on that route (measured 2-5 s a page). |
+| `MENTIONS_MAX_PAGES` | `2` | Cursor pages per term on that route. |
+| `MENTIONS_REQUIRE_TOKEN` | `false` | Put the bearer check on `/reddit/mentions` too. Off because the caller is a Code node. |
 | `MOBILE_ENABLED` | `true` | Kill switch for the app route. Off means the browser does bodies and threads at ~20x the bandwidth. |
 | `MOBILE_DEVICES` | `3` | Devices in flight at once; caps concurrent calls on the route. |
 | `MOBILE_MIN_BUDGET` | `10` | Re-mint when a token's 100-per-10-minutes budget falls this low. |

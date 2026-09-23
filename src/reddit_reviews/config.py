@@ -76,6 +76,20 @@ class Settings:
     mobile_spacing_jitter_s: float = float(os.environ.get("MOBILE_SPACING_JITTER_S", "1"))
     # Per-request timeout. These calls answer in ~0.2s; this is only for a hung socket.
     mobile_timeout_s: int = _env_int("MOBILE_TIMEOUT_S", 25)
+    # ----------------------------------------------------------------- the comment-search fallback
+    # POST /reddit/mentions replaces the Tavily call in workflow 02's `Reddit Fallback Via Web
+    # Search`. That Code node gives the call 45 s, so this route has its own, shorter clocks:
+    #   one fetch                                 MENTIONS_FETCH_TIMEOUT_MS = 10 s (measured 2-5 s)
+    #   page 1 worst case = 2 x 10 + RETRY_DELAY  22 s, never skipped
+    #   page 2 reservation = 1 x 10 + 5 s body    page 2 only if page 1 was done by ~15 s
+    #   MENTIONS_BUDGET_S                          30 s, so the answer leaves by ~31 s
+    mentions_budget_s: int = _env_int("MENTIONS_BUDGET_S", 30)
+    mentions_fetch_timeout_ms: int = _env_int("MENTIONS_FETCH_TIMEOUT_MS", 10_000)
+    mentions_max_pages: int = _env_int("MENTIONS_MAX_PAGES", 2)
+    # n8n Code nodes cannot read credentials, and the container has no published ports (only the
+    # docker network reaches it), so this route is open by default. Flip it on if the call ever moves
+    # into an HTTP Request node that can carry the `reddit-scraper` credential.
+    mentions_require_token: bool = _env_bool("MENTIONS_REQUIRE_TOKEN", False)
     # Pause before retrying a blocked page, seconds.
     retry_delay_s: float = float(os.environ.get("RETRY_DELAY_S", "2"))
     host: str = os.environ.get("HOST", "0.0.0.0")

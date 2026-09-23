@@ -40,7 +40,7 @@ uv run reddit-reviews serve           # HTTP service on :8001
 
 Verify with `curl localhost:8001/health` (expects `"status":"ok"`); interactive API docs are at `/docs`.
 
-The service is driven over its HTTP API: post search by terms, and threads with their comments by link, in the Apify actor's request and response shape. See [api.md](docs/api.md) for endpoints, auth (`Authorization: Bearer`) and the error contract.
+The service is driven over its HTTP API: post search by terms, and threads with their comments by link, in the Apify actor's request and response shape. It also serves the comment-search fallback (`POST /reddit/mentions`) that replaced the pipeline's Tavily web search. See [api.md](docs/api.md) for endpoints, auth (`Authorization: Bearer`) and the error contract.
 
 ## Configuration
 

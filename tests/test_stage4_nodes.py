@@ -82,3 +82,76 @@ def test_fetch_comments_node_reads_thread_items(tmp_path):
     c = out["reddit_comments"][0]
     assert c["subreddit"] and c["age_days"] is not None and isinstance(c["names_brand"], bool)
     assert out["reddit_outcome"] in {"ok", "thin"}
+
+
+# --------------------------------------------------------------------------- Reddit Fallback Via Web Search
+
+
+def mentions_response() -> dict:
+    from conftest import FakeReddit
+
+    from reddit_reviews.mapping import mention_item
+    from reddit_reviews.mentions import search_mentions
+    from reddit_reviews.scraper import build_comment_search_url
+
+    site = FakeReddit({build_comment_search_url("Howdysnax"): (200, fixture("search_comments_howdysnax.html"))})
+    res = search_mentions(["Howdysnax"], fetcher=site)
+    return {"query": "Howdysnax", "results": [mention_item(t) for t in res.threads], "response_time": res.seconds}
+
+
+FALLBACK_ITEM = {
+    "Brand Name": "Howdysnax",
+    "domain_clean": "howdysnax.com",
+    "brand_match_tokens": ["howdysnax", "howdysnax.com"],
+    "reddit_search_terms": ["Howdysnax", "Howdysnax protein snacks", "Howdysnax reviews"],
+    "reddit_query": "Howdysnax | Howdysnax protein snacks | Howdysnax reviews",
+    "reddit_outcome": "all_irrelevant",
+    "reddit_posts": [],
+}
+
+PROVENANCE = "[WEB SEARCH EXTRACT, not a scraped post."
+
+
+def test_fallback_node_rescues_comment_mentions(tmp_path):
+    out = run(tmp_path, "fallback", FALLBACK_ITEM, mentions_response())
+    assert out["__request"]["url"].endswith("/reddit/mentions")
+    assert out["__request"]["body"]["searchTerms"] == FALLBACK_ITEM["reddit_search_terms"]
+    assert "Authorization" not in (out["__request"]["headers"] or {})
+    assert out["reddit_outcome"] == "ok_web_search_fallback" and out["reddit_has_data"] is True
+    assert out["reddit_fallback_used"] is True and out["reddit_fallback_count"] == 3
+    assert out["tavily_calls"] == 1 and out["tavily_errors"] == 0 and out["reddit_fallback_error"] == ""
+    assert out["reddit_post_count"] == 3
+    for p in out["reddit_posts"]:
+        assert p["subreddit"] == "web-search-extract" and p["age_days"] is None and p["score_upvotes"] == 0
+        assert p["title"].startswith(PROVENANCE) and len(p["text"]) <= 900 and p["url"].startswith("https://www.reddit.com/r/")
+    assert any("howdysnax.com" in p["text"] for p in out["reddit_posts"])
+
+
+def test_fallback_node_gate_drops_results_that_do_not_name_the_brand(tmp_path):
+    item = {**FALLBACK_ITEM, "brand_match_tokens": ["gymshark", "gymshark.com"]}
+    out = run(tmp_path, "fallback", item, mentions_response())
+    assert out["reddit_fallback_count"] == 0 and out["reddit_fallback_dropped_no_brand_mention"] == 3
+    assert out["reddit_outcome"] == "all_irrelevant" and out["tavily_errors"] == 0
+
+
+def test_fallback_node_empty_results_is_not_an_error(tmp_path):
+    out = run(tmp_path, "fallback", FALLBACK_ITEM, {"query": "Howdysnax", "results": [], "response_time": 3.0})
+    assert out["reddit_fallback_used"] is True and out["reddit_fallback_count"] == 0
+    assert out["tavily_calls"] == 1 and out["tavily_errors"] == 0 and out["reddit_outcome"] == "all_irrelevant"
+
+
+def test_fallback_node_503_counts_as_an_error(tmp_path):
+    out = run(tmp_path, "fallback", FALLBACK_ITEM, {"__status": 503, "error": {"type": "ScrapeBlocked"}})
+    assert out["tavily_errors"] == 1 and out["reddit_fallback_error"] and out["reddit_outcome"] == "all_irrelevant"
+
+
+def test_fallback_node_passes_through_when_primary_ok(tmp_path):
+    out = run(tmp_path, "fallback", {**FALLBACK_ITEM, "reddit_outcome": "ok"}, mentions_response())
+    assert out["tavily_calls"] == 0 and out["reddit_fallback_used"] is False and out["__request"] == {}
+
+
+def test_fallback_node_appends_after_existing_posts_and_caps_at_20(tmp_path):
+    existing = [{"id": f"t3_{i}", "title": f"real {i}", "text": "x", "subreddit": "r", "url": ""} for i in range(19)]
+    out = run(tmp_path, "fallback", {**FALLBACK_ITEM, "reddit_outcome": "thin", "reddit_posts": existing}, mentions_response())
+    assert out["reddit_post_count"] == 20 and out["reddit_posts"][0]["title"] == "real 0"
+    assert out["reddit_posts"][-1]["subreddit"] == "web-search-extract"

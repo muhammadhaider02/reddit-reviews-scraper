@@ -94,6 +94,7 @@ Run it from the n8n UI or over MCP (`execute_workflow`, manual mode). A 26-brand
 | `/health` `blocked` or `failed` rising | proxy exits refused, or the browser is crashing; read the log for the port |
 | `/health` `truncated` rising | `SCRAPE_BUDGET_S` is biting; too many brands in flight on the browser gate |
 | `/health` `mobile.blocked` rising, or `mobile.calls` flat | Reddit closed the app route; results survive, bandwidth is ~20x |
+| `/health` `mentions` flat while `Build Run Telemetry`'s `tavily_calls` climbs | the fallback node is not reaching this route; check the node's URL and the container's network |
 | Proxy dashboard | ~5 MB per brand on the hybrid; ~90 MB per brand means the app route is down |
 | `docker stats` memory near 2g | raise `mem_limit` before raising `MAX_CONCURRENCY`, never the other way round |
 
@@ -105,6 +106,7 @@ Not applied, and not to be applied without a decision. Recorded so the shape of 
 |---|---|
 | `Apify: Reddit Search` | URL → `http://reddit-reviews:8001/reddit`; authentication → the `reddit-scraper` Header Auth credential; drop the `maxTotalChargeUsd` and `timeout` query parameters. Body unchanged. |
 | `Apify: Reddit Comments` | same |
+| `Reddit Fallback Via Web Search` (Code node, workflow 02) | the `httpRequest` inside it → `POST http://reddit-reviews:8001/reddit/mentions` with `{ searchTerms, query, maxResults: 15 }`, no Authorization header (the route is open, see `MENTIONS_REQUIRE_TOKEN`); gate, mapping, outcome strings and the `tavily_calls` / `tavily_errors` keys stay, because `Build Run Telemetry` sums those by name. `tests/n8n/reddit_fallback_via_web_search.js` is the code to paste. |
 
 `Assess Vendors` gates on the Apify monthly limit; once Trustpilot and Reddit both leave Apify that gate protects nothing. Adding `reddit_search_terms` to the `Save Research Bundle` mapping would make future runs reproducible.
 

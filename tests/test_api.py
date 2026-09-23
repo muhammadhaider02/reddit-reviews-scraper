@@ -1,5 +1,5 @@
 import pytest
-from conftest import fixture, set_frozen
+from conftest import FakeReddit, fixture, set_frozen
 from fastapi.testclient import TestClient
 
 from reddit_reviews import api
@@ -51,6 +51,22 @@ def client():
 
 def canned_search(*_a, **_k):
     return SearchResult(posts=parse_search(fixture("search_gymshark_reviews.html"), "Gymshark reviews").posts, pages_fetched=1, seconds=1.0)
+
+
+def canned_mentions(*_a, **_k):
+    from reddit_reviews.mentions import search_mentions
+    from reddit_reviews.scraper import build_comment_search_url
+
+    site = FakeReddit({build_comment_search_url("Howdysnax"): (200, fixture("search_comments_howdysnax.html"))})
+    return search_mentions(["Howdysnax"], fetcher=site)
+
+
+def canned_mentions(*_a, **_k):
+    from reddit_reviews.mentions import search_mentions
+    from reddit_reviews.scraper import build_comment_search_url
+
+    site = FakeReddit({build_comment_search_url("Howdysnax"): (200, fixture("search_comments_howdysnax.html"))})
+    return search_mentions(["Howdysnax"], fetcher=site)
 
 
 def canned_threads(*_a, **_k):
@@ -207,3 +223,84 @@ def test_health_counters(client, monkeypatch):
     assert after["ok"] == before["ok"] + 1
     assert after["search"] == before["search"] + 1
     assert after["in_flight"] == 0
+
+
+# --------------------------------------------------------------------------- /reddit/mentions
+
+
+def test_mentions_response_shape(client, monkeypatch):
+    monkeypatch.setattr(api, "search_mentions", canned_mentions)
+    r = client.post("/reddit/mentions", json={"searchTerms": ["Howdysnax", "Howdysnax reviews"], "maxResults": 15})
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"query", "results", "response_time"} and body["query"] == "Howdysnax | Howdysnax reviews"
+    assert len(body["results"]) == 3
+    for item in body["results"]:
+        assert {"title", "url", "content", "raw_content"} <= set(item)
+        assert item["url"].startswith("https://www.reddit.com/r/")
+    assert r.headers["X-Term-Counts"] == "3/3" and r.headers["X-Truncated"] == "false"
+    assert "X-Scrape-Seconds" in r.headers and r.headers["X-Terms-Failed"] == "0"
+
+
+def test_mentions_accepts_the_pipe_query_and_prefers_terms(client, monkeypatch):
+    seen = {}
+
+    def fake(terms, max_results, include_nsfw):
+        seen.update(terms=terms, max_results=max_results)
+        return canned_mentions()
+
+    monkeypatch.setattr(api, "search_mentions", fake)
+    assert client.post("/reddit/mentions", json={"query": "Safe Hero | Safe Hero car escape tool | Safe Hero reviews"}).status_code == 200
+    assert seen["terms"] == ["Safe Hero", "Safe Hero car escape tool", "Safe Hero reviews"] and seen["max_results"] == 15
+    assert client.post("/reddit/mentions", json={"reddit_search_terms": ["A", "B"], "reddit_query": "C | D", "maxResults": 5}).status_code == 200
+    assert seen["terms"] == ["A", "B"] and seen["max_results"] == 5
+
+
+def test_mentions_empty_is_200_with_empty_results(client, monkeypatch):
+    from reddit_reviews.mentions import MentionsResult
+
+    monkeypatch.setattr(api, "search_mentions", lambda *a, **k: MentionsResult(threads=[], pages_fetched=1, seconds=2.0, term_counts={"x": (0, 0)}))
+    before = api.counters["empty"]
+    r = client.post("/reddit/mentions", json={"searchTerms": ["x"]})
+    assert r.status_code == 200 and r.json()["results"] == [] and api.counters["empty"] == before + 1
+
+
+def test_mentions_blocked_is_503_with_the_error_envelope(client, monkeypatch):
+    def blocked(*a, **k):
+        raise ScrapeBlocked("reddit refused the request (HTTP 403)")
+
+    monkeypatch.setattr(api, "search_mentions", blocked)
+    r = client.post("/reddit/mentions", json={"searchTerms": ["x"]})
+    assert r.status_code == 503 and "results" not in r.json() and r.json()["error"]["type"] == "ScrapeBlocked"
+
+
+def test_mentions_400_without_terms(client, monkeypatch):
+    monkeypatch.setattr(api, "search_mentions", canned_mentions)
+    assert client.post("/reddit/mentions", json={}).status_code == 400
+    assert client.post("/reddit/mentions", json={"query": " | "}).status_code == 400
+
+
+def test_mentions_route_is_open_while_reddit_stays_locked(monkeypatch):
+    monkeypatch.setattr(api, "search_mentions", canned_mentions)
+    monkeypatch.setattr(api, "scrape_search", canned_search)
+    before = api.settings.api_token, api.settings.mentions_require_token
+    set_frozen(api.settings, "api_token", "s3cret")
+    set_frozen(api.settings, "mentions_require_token", False)
+    try:
+        with TestClient(api.app) as c:
+            assert c.post("/reddit", json={"searchTerms": ["x"]}).status_code == 401
+            assert c.post("/reddit/mentions", json={"searchTerms": ["x"]}).status_code == 200
+            set_frozen(api.settings, "mentions_require_token", True)
+            assert c.post("/reddit/mentions", json={"searchTerms": ["x"]}).status_code == 401
+            assert c.post("/reddit/mentions", json={"searchTerms": ["x"]}, headers={"Authorization": "Bearer s3cret"}).status_code == 200
+    finally:
+        set_frozen(api.settings, "api_token", before[0])
+        set_frozen(api.settings, "mentions_require_token", before[1])
+
+
+def test_health_reports_mentions(client, monkeypatch):
+    monkeypatch.setattr(api, "search_mentions", canned_mentions)
+    before = client.get("/health").json()["mentions"]
+    client.post("/reddit/mentions", json={"searchTerms": ["x"]})
+    h = client.get("/health").json()
+    assert h["mentions"] == before + 1 and h["mentions_auth"] is False
