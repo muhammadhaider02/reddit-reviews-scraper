@@ -91,7 +91,10 @@ def test_parse_comment_search_with_cursor():
 # --------------------------------------------------------------------------- orchestration
 
 
-def test_merge_keeps_term_order_and_dedupes_threads():
+def test_merge_keeps_term_order_and_dedupes_threads(monkeypatch):
+    # Two fixtures, two brands: the merge mechanics are under test, not the brand-as-a-word check,
+    # which would rightly drop every Gymshark hit for a request whose brand is Howdysnax.
+    monkeypatch.setattr(mentions, "names_brand_as_a_word", lambda text, brand: True)
     site = comment_site()
     res = search_mentions(["Howdysnax", "Gymshark reviews"], max_results=25, fetcher=site)
     assert [t.subreddit for t in res.threads[:3]] == ["Protein", "OaklandFood", "office"]
@@ -133,7 +136,8 @@ def test_deadline_truncates_before_page_two():
     assert len(res.threads) == 7 and res.truncated is True and res.failed_terms == {}
 
 
-def test_partial_failure_returns_the_other_terms():
+def test_partial_failure_returns_the_other_terms(monkeypatch):
+    monkeypatch.setattr(mentions, "names_brand_as_a_word", lambda text, brand: True)  # two brands, see above
     site = comment_site({url_for("Howdysnax"): (403, fixture("blocked.html"))})
     res = search_mentions(["Howdysnax", "Gymshark reviews"], max_results=25, fetcher=site)
     assert list(res.failed_terms) == ["Howdysnax"]
@@ -246,6 +250,54 @@ def test_all_blocked_is_a_scrape_failed_for_non_vendor_errors():
 
 
 from reddit_reviews.mentions import Corroboration  # noqa: E402
+
+
+def test_the_brand_must_be_a_word_of_its_own():
+    """Execution 3335, 23 Sep 2026: Reddit matched "arq8" inside ids and a key, 5 junk threads of 8."""
+    from reddit_reviews.mentions import names_brand_as_a_word
+
+    for junk in [
+        "well reviewed one near downtown: https://maps.app.goo.gl/YHvb94R9M5EcbARq8?g_st=ic (link: maps.app.goo.gl/YHvb94R9M5EcbARq8)",
+        "noodled the section for a bit. (link: youtu.be/L_pUxXhArq8) If you listen to Cowboy Song",
+        "Please allow me to introduce myself: https://www.youtube.com/watch?v=1LyG0S_arq8 (link: www.youtube.com/watch)",
+        "Here's s link https://www.reddit.com/r/Dewalt/s/Wz2AenARQ8 (link: www.reddit.com/r/Dewalt/s/Wz2AenARQ8)",
+        "Free to whoever gets it first: ?V24H-N7F24-ARQ8? ? is the missing letter",
+        "ARQ8XL is the model number",
+    ]:
+        assert not names_brand_as_a_word(junk, "Arq8"), junk
+    for real in [
+        "Am using the arq8 creatine gummies. Has anyone taken creatine",
+        "I got served an ad on Instagram for a gummy creatine called Arq8 that apparently",
+        "Arq8's powder dissolves better", "try @arq8 on insta", "ARQ8.", "u/arq8 posted it", "(arq8)",
+    ]:
+        assert names_brand_as_a_word(real, "Arq8"), real
+    # r/office names Howdysnax only in an href, rendered as a link host
+    assert names_brand_as_a_word("apparently this shit is really good! (link: www.howdysnax.com/products/box)", "Howdysnax")
+    assert names_brand_as_a_word("Lyons Leather Co, the crossbody one", "Lyons Leather Co.")
+    assert names_brand_as_a_word("ordered from kindwatersystems.com last week", "Kind Water Systems")
+    assert names_brand_as_a_word("the Kind-Water-Systems softener", "Kind Water Systems")
+    assert not names_brand_as_a_word("be kind, water the plants, check the systems", "Kind Water Systems")
+    assert names_brand_as_a_word("anything", ""), "no brand: nothing to check"
+
+
+def test_brand_of_is_the_words_the_terms_share():
+    from reddit_reviews.mentions import brand_of
+
+    assert brand_of(["Arq8", "Arq8 creatine gummies", "Arq8 reviews"]) == "Arq8"
+    assert brand_of(["Kind Water Systems", "Kind Water Systems water softener", "Kind Water Systems reviews"]) == "Kind Water Systems"
+    assert brand_of(["Gymshark reviews"]) == "Gymshark"
+    assert brand_of(["Howdysnax"]) == "Howdysnax"
+    assert brand_of(["Safe Hero", "car escape tool"]) == "Safe Hero", "a term that shares nothing is ignored"
+    assert brand_of(["The Longevity Store", "the longevity store NAD+"]) == "The Longevity Store"
+
+
+def test_search_mentions_counts_opaque_hits(monkeypatch):
+    real = search_mentions(["Howdysnax"], fetcher=comment_site())
+    assert real.opaque_dropped == 0 and len(real.threads) == 3, "the r/office link-only mention survives"
+    # A brand the fixture's comments never name as a word: every hit is opaque, no thread is built.
+    monkeypatch.setattr(mentions, "names_brand_as_a_word", lambda text, brand: False)
+    none = search_mentions(["Howdysnax"], fetcher=comment_site())
+    assert none.opaque_dropped == 3 and none.threads == []
 
 
 def test_one_word_brands_need_no_corroboration():

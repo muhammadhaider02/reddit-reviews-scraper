@@ -122,6 +122,8 @@ class MentionsResult:
     bodies_filled: int = 0
     # Threads whose only evidence was the brand phrase used as ordinary words (see Corroboration).
     generic_dropped: int = 0
+    # Comment hits where the brand was only a run of letters inside an opaque id (see names_brand_as_a_word).
+    opaque_dropped: int = 0
     # Per term, in request order: (comment hits its pages produced, threads it was first to find).
     term_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -147,6 +149,45 @@ def _comment_text(body) -> str:
     if links:
         text = f"{text} (link: {', '.join(links[:3])})" if text else f"(link: {', '.join(links[:3])})"
     return text
+
+
+_TERM_SUFFIX = {"reviews", "review", "reddit"}
+
+
+def brand_of(terms: list[str]) -> str:
+    """The brand name the terms share. Parse Keywords builds term 1 as the brand and the others as
+    that name plus a product or "reviews" ("Arq8", "Arq8 creatine gummies", "Arq8 reviews"), so
+    the brand is the longest run of leading words every term starts with; a lone "Gymshark
+    reviews" loses its trailing "reviews". Falls back to term 1 whole."""
+    common = terms[0].split()
+    for t in terms[1:]:
+        ws = t.split()
+        n = 0
+        while n < len(common) and n < len(ws) and common[n].lower() == ws[n].lower():
+            n += 1
+        if n:
+            common = common[:n]
+    while len(common) > 1 and common[-1].lower().strip("'.,") in _TERM_SUFFIX:
+        common = common[:-1]
+    return " ".join(common)
+
+
+def names_brand_as_a_word(text: str, brand: str) -> bool:
+    """Whether the comment names the brand as a word of its own, not as a run of letters inside
+    something opaque. Reddit's comment search matches "arq8" inside a Google Maps id
+    (maps.app.goo.gl/YHvb94R9M5EcbARq8), a YouTube id (youtu.be/L_pUxXhArq8), a Reddit share link
+    (/s/Wz2AenARQ8) and a Steam key (V24H-N7F24-ARQ8). The first production run after the Tavily
+    cutover (23 Sep 2026, execution 3335) kept 5 such threads of 8 for Arq8, and the node's gate
+    cannot tell, because the letters ARE in the text. So the brand must occur with nothing
+    alphanumeric, `_` or `-` before it and nothing alphanumeric or `_` after it. That still
+    accepts "arq8's", "@arq8", "www.howdysnax.com" (r/office names Howdysnax only in an href,
+    rendered by _comment_text as a link host) and "kindwatersystems.com" for a spaced name."""
+    words = [w.strip("'.-") for w in re.findall(r"[A-Za-z0-9]+(?:['.-][A-Za-z0-9]+)*", brand or "")]
+    words = [w for w in words if w]
+    if not words:
+        return True
+    pattern = r"(?<![A-Za-z0-9_-])" + r"[\s_-]*".join(re.escape(w) for w in words) + r"(?:'?s)?(?![A-Za-z0-9_])"
+    return re.search(pattern, text or "", re.IGNORECASE) is not None
 
 
 def parse_comment_search(html: str, term: str = "") -> CommentSearchPage:
@@ -447,6 +488,8 @@ def search_mentions(
     seen_posts: set[str] = set()
     lock = threading.Lock()
     outcomes: dict[str, _TermHits | RedditError] = {}
+    opaque_dropped = 0
+    brand = brand_of(terms)
 
     def run(term: str) -> None:
         try:
@@ -473,6 +516,9 @@ def search_mentions(
         truncated = truncated or out.truncated
         first = 0
         for h in out.hits:
+            if not names_brand_as_a_word(h.text, brand):
+                opaque_dropped += 1
+                continue
             t = threads.get(h.post_id)
             if t is None:
                 try:
@@ -494,6 +540,8 @@ def search_mentions(
         "; ".join(f"{t!r} hits={h} threads={n}" + (" FAILED" if t in failed else "") for t, (h, n) in term_counts.items()),
         len(threads), len(seen_comments),
     )
+    if opaque_dropped:
+        log.info("%r: %d comment hit(s) dropped, the brand only a run of letters inside an id or a key", brand, opaque_dropped)
     if len(failed) == len(terms):
         err = outcomes[terms[0]]
         assert isinstance(err, RedditError)
@@ -542,5 +590,6 @@ def search_mentions(
         truncated=truncated,
         bodies_filled=bodies,
         generic_dropped=generic_dropped,
+        opaque_dropped=opaque_dropped,
         term_counts=term_counts,
     )

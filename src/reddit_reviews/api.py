@@ -316,13 +316,15 @@ async def reddit_mentions(req: MentionsRequest):
         "X-Truncated": "true" if res.truncated else "false",
         "X-Mobile-Posts": str(res.bodies_filled),
         "X-Generic-Dropped": str(res.generic_dropped),
+        "X-Opaque-Dropped": str(res.opaque_dropped),
         # hits/threads per term in request order: comment hits the term's pages produced, and the
         # threads it was the first to find. Numbers only, as on /reddit.
         "X-Term-Counts": ",".join(f"{h}/{n}" for h, n in res.term_counts.values()),
     }
     log.info(
-        "ok mentions terms=%d threads=%d comments=%d bodies=%d generic_dropped=%d failed_terms=%d %.1fs",
-        len(terms), len(results), sum(len(r["matched_comments"]) for r in results), res.bodies_filled, res.generic_dropped, len(res.failed_terms), res.seconds,
+        "ok mentions terms=%d threads=%d comments=%d bodies=%d generic_dropped=%d opaque_dropped=%d failed_terms=%d %.1fs",
+        len(terms), len(results), sum(len(r["matched_comments"]) for r in results), res.bodies_filled, res.generic_dropped, res.opaque_dropped,
+        len(res.failed_terms), res.seconds,
     )
     return JSONResponse(content={"query": " | ".join(terms), "results": results, "response_time": res.seconds}, headers=headers)
 
