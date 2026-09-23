@@ -276,6 +276,8 @@ def test_the_brand_must_be_a_word_of_its_own():
     assert names_brand_as_a_word("Lyons Leather Co, the crossbody one", "Lyons Leather Co.")
     assert names_brand_as_a_word("ordered from kindwatersystems.com last week", "Kind Water Systems")
     assert names_brand_as_a_word("the Kind-Water-Systems softener", "Kind Water Systems")
+    for spelled in ["blackmask.products", "blackmask products", "blackmaskproducts.com", "BlackMask Products"]:
+        assert names_brand_as_a_word(f"I bought from {spelled} last week", "blackmask.products"), spelled
     assert not names_brand_as_a_word("be kind, water the plants, check the systems", "Kind Water Systems")
     assert names_brand_as_a_word("anything", ""), "no brand: nothing to check"
 

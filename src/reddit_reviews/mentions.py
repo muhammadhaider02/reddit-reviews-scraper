@@ -182,11 +182,12 @@ def names_brand_as_a_word(text: str, brand: str) -> bool:
     alphanumeric, `_` or `-` before it and nothing alphanumeric or `_` after it. That still
     accepts "arq8's", "@arq8", "www.howdysnax.com" (r/office names Howdysnax only in an href,
     rendered by _comment_text as a link host) and "kindwatersystems.com" for a spaced name."""
-    words = [w.strip("'.-") for w in re.findall(r"[A-Za-z0-9]+(?:['.-][A-Za-z0-9]+)*", brand or "")]
-    words = [w for w in words if w]
+    words = re.findall(r"[A-Za-z0-9]+", brand or "")
     if not words:
         return True
-    pattern = r"(?<![A-Za-z0-9_-])" + r"[\s_-]*".join(re.escape(w) for w in words) + r"(?:'?s)?(?![A-Za-z0-9_])"
+    # The parts may be run together, spaced, or joined by punctuation: "blackmask.products",
+    # "blackmask products", "kindwatersystems", "Kind-Water-Systems".
+    pattern = r"(?<![A-Za-z0-9_-])" + r"[\s._'-]*".join(re.escape(w) for w in words) + r"(?:'?s)?(?![A-Za-z0-9_])"
     return re.search(pattern, text or "", re.IGNORECASE) is not None
 
 
