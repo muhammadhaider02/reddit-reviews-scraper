@@ -91,10 +91,10 @@ def mentions_response() -> dict:
     from conftest import FakeReddit
 
     from reddit_reviews.mapping import mention_item
-    from reddit_reviews.mentions import search_mentions
+    from reddit_reviews.mentions import phrase_query, search_mentions
     from reddit_reviews.scraper import build_comment_search_url
 
-    site = FakeReddit({build_comment_search_url("Howdysnax"): (200, fixture("search_comments_howdysnax.html"))})
+    site = FakeReddit({build_comment_search_url(phrase_query("Howdysnax", "Howdysnax")): (200, fixture("search_comments_howdysnax.html"))})
     res = search_mentions(["Howdysnax"], fetcher=site)
     return {"query": "Howdysnax", "results": [mention_item(t) for t in res.threads], "response_time": res.seconds}
 

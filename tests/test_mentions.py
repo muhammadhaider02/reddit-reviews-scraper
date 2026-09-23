@@ -9,7 +9,7 @@ from conftest import FakeReddit, fixture, set_frozen
 from reddit_reviews import mentions
 from reddit_reviews.config import settings
 from reddit_reviews.mapping import mention_item
-from reddit_reviews.mentions import parse_comment_search, search_mentions
+from reddit_reviews.mentions import parse_comment_search, phrase_query, search_mentions
 from reddit_reviews.scraper import ScrapeBlocked, ScrapeFailed, build_comment_search_url
 
 HOWDYSNAX = "search_comments_howdysnax.html"
@@ -17,11 +17,15 @@ GYMSHARK = "search_comments_gymshark_reviews.html"
 GYMSHARK_2 = "search_comments_gymshark_reviews_page2.html"
 
 
+def url_for(term: str, primary: str | None = None) -> str:
+    return build_comment_search_url(phrase_query(term, primary or term))
+
+
 def comment_site(extra: dict | None = None) -> FakeReddit:
     page1 = fixture(GYMSHARK)
     pages = {
-        build_comment_search_url("Howdysnax"): (200, fixture(HOWDYSNAX)),
-        build_comment_search_url("Gymshark reviews"): (200, page1),
+        url_for("Howdysnax"): (200, fixture(HOWDYSNAX)),
+        url_for("Gymshark reviews"): (200, page1),
         parse_comment_search(page1).next_url: (200, fixture(GYMSHARK_2)),
     }
     pages.update(extra or {})
@@ -35,6 +39,18 @@ def test_comment_search_url_is_literal():
     url = build_comment_search_url("Safe Hero car escape tool")
     assert "type=comments" in url and "q=Safe+Hero+car+escape+tool" in url
     assert "disableSpellCorrection=true" in url and "sort=relevance" in url and "t=all" in url
+
+
+def test_phrase_query_quotes_the_brand_and_leaves_the_rest_loose():
+    """Unquoted, a three-word brand returns comments that merely contain the words; measured 23 Sep
+    2026, "Kind Water Systems" had 0 of 10 carrying the phrase unquoted and 10 of 10 quoted."""
+    assert phrase_query("Kind Water Systems", "Kind Water Systems") == '"Kind Water Systems"'
+    assert phrase_query("Kind Water Systems water filter", "Kind Water Systems") == '"Kind Water Systems" water filter'
+    assert phrase_query("Kind Water Systems reviews", "Kind Water Systems") == '"Kind Water Systems" reviews'
+    assert phrase_query("Howdysnax", "Howdysnax") == '"Howdysnax"'
+    assert phrase_query("Gymshark reviews", "Howdysnax") == '"Gymshark reviews"', "not built on the brand: quoted whole"
+    assert phrase_query('"Already quoted"', "x") == '"Already quoted"'
+    assert 'q=%22Kind+Water+Systems%22+water+filter' in build_comment_search_url(phrase_query("Kind Water Systems water filter", "Kind Water Systems"))
 
 
 def test_parse_comment_search_howdysnax():
@@ -118,7 +134,7 @@ def test_deadline_truncates_before_page_two():
 
 
 def test_partial_failure_returns_the_other_terms():
-    site = comment_site({build_comment_search_url("Howdysnax"): (403, fixture("blocked.html"))})
+    site = comment_site({url_for("Howdysnax"): (403, fixture("blocked.html"))})
     res = search_mentions(["Howdysnax", "Gymshark reviews"], max_results=25, fetcher=site)
     assert list(res.failed_terms) == ["Howdysnax"]
     assert res.term_counts["Howdysnax"] == (0, 0) and len(res.threads) == 16
@@ -147,7 +163,7 @@ def test_search_requires_a_term():
 def test_at_most_three_terms_are_searched():
     site = comment_site()
     search_mentions(["Howdysnax", "Gymshark reviews", "a", "b"], max_results=25, fetcher=site)
-    assert any("q=a&" in u for u in site.calls) and not any("q=b&" in u for u in site.calls)
+    assert any("q=%22a%22&" in u for u in site.calls) and not any("q=%22b%22&" in u for u in site.calls)
 
 
 def test_bodies_filled_from_mobile_in_one_call(mobile_on, monkeypatch):

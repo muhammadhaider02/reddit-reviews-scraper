@@ -54,18 +54,10 @@ def canned_search(*_a, **_k):
 
 
 def canned_mentions(*_a, **_k):
-    from reddit_reviews.mentions import search_mentions
+    from reddit_reviews.mentions import phrase_query, search_mentions
     from reddit_reviews.scraper import build_comment_search_url
 
-    site = FakeReddit({build_comment_search_url("Howdysnax"): (200, fixture("search_comments_howdysnax.html"))})
-    return search_mentions(["Howdysnax"], fetcher=site)
-
-
-def canned_mentions(*_a, **_k):
-    from reddit_reviews.mentions import search_mentions
-    from reddit_reviews.scraper import build_comment_search_url
-
-    site = FakeReddit({build_comment_search_url("Howdysnax"): (200, fixture("search_comments_howdysnax.html"))})
+    site = FakeReddit({build_comment_search_url(phrase_query("Howdysnax", "Howdysnax")): (200, fixture("search_comments_howdysnax.html"))})
     return search_mentions(["Howdysnax"], fetcher=site)
 
 

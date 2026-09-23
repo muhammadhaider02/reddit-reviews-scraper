@@ -217,6 +217,22 @@ def parse_comment_search(html: str, term: str = "") -> CommentSearchPage:
 # --------------------------------------------------------------------------- orchestration
 
 
+def phrase_query(term: str, primary: str) -> str:
+    """The comment-search query for a term: the brand name as an exact phrase.
+
+    Unquoted, Reddit ranks comments that contain the words anywhere, and a three-word brand
+    loses: measured 23 Sep 2026, "Kind Water Systems" returned 10 comments about Savannah River
+    and the Houthis with 0 carrying the phrase, while the quoted form returned 10 of 10 with it.
+    Parse Keywords builds term 1 as the brand name and terms 2 and 3 as that name plus a product
+    or "reviews", so the brand part is quoted and the rest is left loose for ranking:
+    `"Kind Water Systems" water filter`. A term that does not start with the brand is quoted whole."""
+    term = term.strip().strip('"')
+    primary = primary.strip().strip('"')
+    if primary and term.lower() != primary.lower() and term.lower().startswith(primary.lower() + " "):
+        return f'"{primary}" {term[len(primary):].strip()}'
+    return f'"{term}"'
+
+
 @dataclass
 class _TermHits:
     hits: list[CommentHit]
@@ -226,6 +242,7 @@ class _TermHits:
 
 def _mentions_term(
     term: str,
+    primary: str,
     max_results: int,
     include_nsfw: bool,
     fetcher: Fetcher,
@@ -235,7 +252,7 @@ def _mentions_term(
 ) -> _TermHits:
     """Comment hits for one term. Page 1 always; later pages only while the request as a whole is
     still short of `max_results` threads and a fetch plus the body fill fit before the deadline."""
-    url: str | None = build_comment_search_url(term)
+    url: str | None = build_comment_search_url(phrase_query(term, primary))
     hits: list[CommentHit] = []
     seen: set[str] = set()
     pages = 0
@@ -336,7 +353,7 @@ def search_mentions(
 
     def run(term: str) -> None:
         try:
-            outcomes[term] = _mentions_term(term, max_results, include_nsfw, fetcher, deadline, seen_posts, lock)
+            outcomes[term] = _mentions_term(term, terms[0], max_results, include_nsfw, fetcher, deadline, seen_posts, lock)
         except RedditError as e:
             outcomes[term] = e
 
