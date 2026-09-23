@@ -254,10 +254,11 @@ def test_one_word_brands_need_no_corroboration():
 
 
 def test_corroboration_vocabulary_excludes_brand_and_stop_words():
-    c = Corroboration.build("Kind Water Systems", ["water softener system", "reverse osmosis"], "whole home water filtration system", "kindwater.com")
+    c = Corroboration.build("Kind Water Systems", ["water softener system", "reverse osmosis", "thermogenic"], "whole home water filtration system", "kindwater.com")
     assert c.first_word == "Kind" and c.domain == "kindwater.com"
-    assert "softener" in c.product_words and "osmosis" in c.product_words and "filtration" in c.product_words
-    assert "water" not in c.product_words and "systems" not in c.product_words and "home" not in c.product_words
+    assert {"water softener", "softener system", "reverse osmosis", "water filtration", "filtration system", "thermogenic"} <= c.product_words
+    assert "water" not in c.product_words and "light" not in c.product_words, "single short words are too generic"
+    assert c.phrase.pattern.startswith(r"\bKind")
 
 
 def test_corroboration_keeps_real_mentions_and_drops_the_phrase_as_ordinary_words():
@@ -279,6 +280,14 @@ def test_corroboration_keeps_real_mentions_and_drops_the_phrase_as_ordinary_word
     assert l.first_word == "Longevity"
     assert l.holds("AG1, IM8, the Longevity store all have money-back guarantees")
     assert not l.holds('Have the "Main Mall" where all the longevity stores are')
+
+    e = Corroboration.build("Exodus Strong", ["red light therapy device", "red light therapy panel"], "red light therapy device", "exodusstrong.com")
+    for junk in ["Exodus, strong enough of a telekinetic to move mountains", "Ideologically closest to Exodus? Strongly disagree.",
+                 "Chamber. Exodus. Strong Guy. Special mention: Darwin.", "I can't recommend Metro: Exodus strongly enough",
+                 "in light of all this, the exodus strong arm tactics failed"]:
+        assert not e.holds(junk), junk
+    assert e.holds("my Exodus Strong panel arrived, red light therapy every morning now")
+    assert e.holds("I use an exodus strong device for light therapy")
 
 
 def test_search_mentions_drops_uncorroborated_threads_before_the_cap(monkeypatch):

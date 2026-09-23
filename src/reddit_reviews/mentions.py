@@ -242,12 +242,20 @@ class Corroboration:
         ("water softener", "mushroom gummies", "crossbody bag");
       - the brand's domain appears.
     Otherwise it is the phrase as ordinary words and it is dropped. It costs a lowercase mention
-    with no product word ("salt free kind water systems work well"): measured, 1 of 15."""
+    with no product word ("salt free kind water systems work well"): measured, 1 of 15.
+
+    Two refinements from the third baseline run. The proper-noun form must be the phrase written
+    contiguously ("Hercules supplements", "the Longevity store"), because "Exodus, strong enough
+    of a telekinetic" and "closest to Exodus? Strongly disagree" had passed on the capital alone:
+    8 X-Men threads for a red-light-therapy brand. And a product word is a two-word phrase from
+    the vocabulary ("water softener", "light therapy", "mushroom gummies") or a single word of six
+    letters or more, because "light" on its own matched "in light of"."""
 
     brand_words: list[str]
     first_word: str  # as written in the term, e.g. "Hercules"; "" when the term is lowercase
-    product_words: set[str]
+    product_words: set[str]  # two-word phrases, plus long single words
     domain: str
+    phrase: "re.Pattern[str] | None" = None  # the brand written contiguously, first word as given
 
     @classmethod
     def build(cls, brand: str, product_keywords: list[str] | None, primary_product: str | None, domain: str | None) -> "Corroboration | None":
@@ -260,26 +268,36 @@ class Corroboration:
         brand_stems = {w.rstrip("s") for w in re.findall(r"[a-z0-9]+", (brand or "").lower())}
         vocab: set[str] = set()
         for phrase in [primary_product or ""] + list(product_keywords or []):
-            for w in re.findall(r"[a-z0-9]+", str(phrase).lower()):
-                if len(w) >= 4 and w not in STOPWORDS and w.rstrip("s") not in brand_stems:
-                    vocab.add(w)
+            ws = [w for w in re.findall(r"[a-z0-9+']+", str(phrase).lower()) if w not in STOPWORDS]
+            for a, b in zip(ws, ws[1:]):
+                if not (a.rstrip("s") in brand_stems and b.rstrip("s") in brand_stems):
+                    vocab.add(f"{a} {b}")
+            if len(ws) == 1 and len(ws[0]) >= 6 and ws[0].rstrip("s") not in brand_stems:
+                vocab.add(ws[0])
         dom = (domain or "").strip().lower().removeprefix("www.")
         if not vocab and not dom:
             return None  # the caller sent no vocabulary: not opted in, every thread goes through
-        return cls(brand_words=words, first_word=first, product_words=vocab, domain=dom)
+        phrase = None
+        if first:
+            rest = [w for w in words[words.index(first) + 1:]]
+            phrase = re.compile(r"\b" + re.escape(first) + "".join(r"\s+" + re.escape(w) + r"s?" for w in rest) + r"\b",
+                                re.IGNORECASE if False else 0)
+            # the first word keeps its case, the rest may be written any way: "Lyons leather co"
+            phrase = re.compile(r"\b" + re.escape(first) + "".join(r"\s+(?i:" + re.escape(w) + r"s?)" for w in rest) + r"\b")
+        return cls(brand_words=words, first_word=first, product_words=vocab, domain=dom, phrase=phrase)
 
     def holds(self, text: str) -> bool:
-        low = text.lower()
+        low = re.sub(r"\s+", " ", text.lower())
         if self.domain and self.domain in low:
             return True
         for w in self.product_words:
             if re.search(r"\b" + re.escape(w) + r"(s|es)?\b", low):
                 return True
-        if self.first_word:
-            for m in re.finditer(r"\b" + re.escape(self.first_word) + r"\b", text):
+        if self.phrase is not None:
+            for m in self.phrase.finditer(text):
                 before = text[: m.start()].rstrip()
                 if before and before[-1] not in _SENTENCE_END:
-                    return True  # capitalised, and not because it opens a sentence
+                    return True  # the phrase, contiguous and capitalised, and not because it opens a sentence
         return False
 
 
