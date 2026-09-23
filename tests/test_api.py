@@ -237,7 +237,7 @@ def test_mentions_response_shape(client, monkeypatch):
 def test_mentions_accepts_the_pipe_query_and_prefers_terms(client, monkeypatch):
     seen = {}
 
-    def fake(terms, max_results, include_nsfw):
+    def fake(terms, max_results, include_nsfw, **kw):
         seen.update(terms=terms, max_results=max_results)
         return canned_mentions()
 

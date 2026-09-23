@@ -120,6 +120,8 @@ class MentionsResult:
     failed_terms: dict[str, str] = field(default_factory=dict)
     truncated: bool = False
     bodies_filled: int = 0
+    # Threads whose only evidence was the brand phrase used as ordinary words (see Corroboration).
+    generic_dropped: int = 0
     # Per term, in request order: (comment hits its pages produced, threads it was first to find).
     term_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -212,6 +214,73 @@ def parse_comment_search(html: str, term: str = "") -> CommentSearchPage:
     m = NEXT_CURSOR_RE.search(html)
     next_url = BASE + htmllib.unescape(m.group(1)) if m else None
     return CommentSearchPage(hits=hits, next_url=next_url)
+
+
+# --------------------------------------------------------------------------- corroboration
+
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at", "by", "with", "from", "co", "inc",
+    "llc", "ltd", "company", "store", "shop", "brand", "products", "product", "reviews", "review", "best",
+    "your", "our", "my", "its", "this", "that", "home", "use", "daily", "friendly", "free", "premium",
+}
+_SENTENCE_END = ".!?:;\n\r\"'(“”‘’*-"
+
+
+@dataclass
+class Corroboration:
+    """What, beyond the phrase itself, says a comment is about THIS brand.
+
+    An exact-phrase search cannot tell "Safe Hero" the car-escape tool from "a very safe hero" in
+    an Overwatch thread, or "The Hero Company" from Hero pens, and the node's gate cannot either:
+    it reads text, and the phrase is in the text. Measured 23 Sep 2026 on the 14-brand Tavily
+    baseline: without this, Safe Hero rescued 15 gaming comments, The Hero Company 15, Exodus
+    Strong 12 (X-Men and Metro: Exodus), against 0 real mentions for all three. A one-word brand
+    (Howdysnax, Eskiin) needs none of this. For a multi-word one, a thread is kept when any of:
+      - the brand's first significant word is written capitalised mid-sentence ("Hercules
+        supplements", "Lyons leather co", "the Longevity store"), the proper-noun signal;
+      - a product word from Parse Keywords' `primary_product` / `product_keywords` appears
+        ("water softener", "mushroom gummies", "crossbody bag");
+      - the brand's domain appears.
+    Otherwise it is the phrase as ordinary words and it is dropped. It costs a lowercase mention
+    with no product word ("salt free kind water systems work well"): measured, 1 of 15."""
+
+    brand_words: list[str]
+    first_word: str  # as written in the term, e.g. "Hercules"; "" when the term is lowercase
+    product_words: set[str]
+    domain: str
+
+    @classmethod
+    def build(cls, brand: str, product_keywords: list[str] | None, primary_product: str | None, domain: str | None) -> "Corroboration | None":
+        words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", brand or "") if w.lower() not in STOPWORDS]
+        if len([w for w in re.findall(r"[A-Za-z0-9]+", brand or "")]) < 2:
+            return None  # one word: distinctive on its own
+        first = next((w for w in words if len(w) >= 3), "")
+        if not first[:1].isupper():
+            first = ""
+        brand_stems = {w.rstrip("s") for w in re.findall(r"[a-z0-9]+", (brand or "").lower())}
+        vocab: set[str] = set()
+        for phrase in [primary_product or ""] + list(product_keywords or []):
+            for w in re.findall(r"[a-z0-9]+", str(phrase).lower()):
+                if len(w) >= 4 and w not in STOPWORDS and w.rstrip("s") not in brand_stems:
+                    vocab.add(w)
+        dom = (domain or "").strip().lower().removeprefix("www.")
+        if not vocab and not dom:
+            return None  # the caller sent no vocabulary: not opted in, every thread goes through
+        return cls(brand_words=words, first_word=first, product_words=vocab, domain=dom)
+
+    def holds(self, text: str) -> bool:
+        low = text.lower()
+        if self.domain and self.domain in low:
+            return True
+        for w in self.product_words:
+            if re.search(r"\b" + re.escape(w) + r"(s|es)?\b", low):
+                return True
+        if self.first_word:
+            for m in re.finditer(r"\b" + re.escape(self.first_word) + r"\b", text):
+                before = text[: m.start()].rstrip()
+                if before and before[-1] not in _SENTENCE_END:
+                    return True  # capitalised, and not because it opens a sentence
+        return False
 
 
 # --------------------------------------------------------------------------- orchestration
@@ -334,6 +403,9 @@ def search_mentions(
     include_nsfw: bool = False,
     fetcher: Fetcher | None = None,
     budget_s: float | None = None,
+    product_keywords: list[str] | None = None,
+    primary_product: str | None = None,
+    domain: str | None = None,
 ) -> MentionsResult:
     """Threads where a comment matches any of the terms, merged across terms (the first term to find
     a thread owns it; every term's matching comments are kept), newest evidence first inside each
@@ -402,7 +474,21 @@ def search_mentions(
         assert isinstance(err, RedditError)
         raise err if isinstance(err, (ScrapeBlocked, ScrapeFailed)) else ScrapeFailed(str(err))
 
-    ordered = list(threads.values())[:max_results]
+    corroboration = Corroboration.build(terms[0], product_keywords, primary_product, domain)
+    generic_dropped = 0
+    candidates = list(threads.values())
+    if corroboration is not None:
+        kept: list[MentionThread] = []
+        for t in candidates:
+            evidence = " ".join([t.title, *(c.text for c in t.comments)])
+            if corroboration.holds(evidence):
+                kept.append(t)
+            else:
+                generic_dropped += 1
+        if generic_dropped:
+            log.info("%r: %d thread(s) dropped as the phrase used as ordinary words, %d kept", terms[0], generic_dropped, len(kept))
+        candidates = kept
+    ordered = candidates[:max_results]
     bodies = 0
     if ordered and mobile.available():
         if deadline - time.time() > BODY_RESERVE_S:
@@ -430,5 +516,6 @@ def search_mentions(
         failed_terms=failed,
         truncated=truncated,
         bodies_filled=bodies,
+        generic_dropped=generic_dropped,
         term_counts=term_counts,
     )

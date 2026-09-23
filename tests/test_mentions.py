@@ -240,3 +240,52 @@ def test_all_blocked_is_a_scrape_failed_for_non_vendor_errors():
     site = FakeReddit(default=(404, "<html><title>gone</title></html>"))
     with pytest.raises(ScrapeFailed):
         search_mentions(["Howdysnax"], fetcher=site)
+
+
+# --------------------------------------------------------------------------- corroboration
+
+
+from reddit_reviews.mentions import Corroboration  # noqa: E402
+
+
+def test_one_word_brands_need_no_corroboration():
+    assert Corroboration.build("Howdysnax", ["snack box"], "snack box", "howdysnax.com") is None
+    assert Corroboration.build("Eskiin", [], "", "") is None
+
+
+def test_corroboration_vocabulary_excludes_brand_and_stop_words():
+    c = Corroboration.build("Kind Water Systems", ["water softener system", "reverse osmosis"], "whole home water filtration system", "kindwater.com")
+    assert c.first_word == "Kind" and c.domain == "kindwater.com"
+    assert "softener" in c.product_words and "osmosis" in c.product_words and "filtration" in c.product_words
+    assert "water" not in c.product_words and "systems" not in c.product_words and "home" not in c.product_words
+
+
+def test_corroboration_keeps_real_mentions_and_drops_the_phrase_as_ordinary_words():
+    c = Corroboration.build("Safe Hero", ["car escape tool", "window breaker", "seatbelt cutter"], "car escape hammer", "safehero.shop")
+    for junk in ["You dont wanna be a boring safe hero main do you?", "I think Xal'atath is a very safe hero.", "Stay safe Heroes and kitty.",
+                 "Safe hero pick for ranked, honestly.", "stay safe hero"]:
+        assert not c.holds(junk), junk
+    assert c.holds("Bought the Safe Hero for my car last month, the seatbelt cutter is sharp.")
+    assert c.holds("I keep an escape tool in the door pocket, the safe hero one")
+    assert c.holds("ordered from safehero.shop, arrived in 3 days")
+
+    h = Corroboration.build("Hercules Supplements", ["fat burner", "pre workout"], "fat burner supplement", "herculessupplements.com.au")
+    assert h.holds("I've used Hercules supplements for awhile and got good results"), "proper noun mid-sentence"
+    assert not h.holds("Hercules? never heard of them"), "opens the sentence, so the capital proves nothing"
+    assert "supplement" not in h.product_words, "a plural of a brand word is still a brand word"
+    assert not h.holds("fed twice a day, turmash, hercules supplement and garlic")
+
+    l = Corroboration.build("The Longevity Store", ["longevity supplement", "NAD+ supplement"], "longevity supplement powder", "thelongevitystore.com")
+    assert l.first_word == "Longevity"
+    assert l.holds("AG1, IM8, the Longevity store all have money-back guarantees")
+    assert not l.holds('Have the "Main Mall" where all the longevity stores are')
+
+
+def test_search_mentions_drops_uncorroborated_threads_before_the_cap(monkeypatch):
+    site = comment_site()
+    plain = search_mentions(["Gymshark reviews"], max_results=25, fetcher=site)
+    assert plain.generic_dropped == 0, "no vocabulary: everything through"
+    # Gymshark comments talk about the brand as a proper noun or about gym clothes; a vocabulary
+    # that matches nothing and a lowercase-only first word leave only the proper-noun signal.
+    strict = search_mentions(["Gymshark reviews"], max_results=25, fetcher=comment_site(), product_keywords=["zzzz"], primary_product="qqqq", domain="nope.example")
+    assert strict.generic_dropped >= 1 and len(strict.threads) + strict.generic_dropped == len(plain.threads)

@@ -165,6 +165,19 @@ class MentionsRequest(BaseModel):
     query: str = Field(default="", validation_alias=AliasChoices("query", "reddit_query", "q"))
     max_results: int = Field(default=15, ge=1, le=25, validation_alias=AliasChoices("maxResults", "max_results"))
     include_nsfw: bool = Field(default=False, validation_alias=AliasChoices("includeNSFW", "include_nsfw"))
+    # Corroboration for a multi-word brand (mentions.Corroboration): Parse Keywords' vocabulary.
+    product_keywords: list[str] = Field(default_factory=list, validation_alias=AliasChoices("productKeywords", "product_keywords"))
+    primary_product: str = Field(default="", validation_alias=AliasChoices("primaryProduct", "primary_product"))
+    domain: str = Field(default="", validation_alias=AliasChoices("domain", "domain_clean"))
+
+    @field_validator("product_keywords", mode="before")
+    @classmethod
+    def _coerce_keywords(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        return [str(t).strip() for t in v if str(t or "").strip()]
 
     @field_validator("search_terms", mode="before")
     @classmethod
@@ -273,7 +286,10 @@ async def reddit_mentions(req: MentionsRequest):
         return JSONResponse(status_code=400, content=_error_body(err, 400))
     counters["in_flight"] += 1
     try:
-        res = await asyncio.to_thread(search_mentions, terms, req.max_results, req.include_nsfw)
+        res = await asyncio.to_thread(
+            search_mentions, terms, req.max_results, req.include_nsfw,
+            product_keywords=req.product_keywords, primary_product=req.primary_product, domain=req.domain,
+        )
     except ValueError as e:
         counters["bad_request"] += 1
         return JSONResponse(status_code=400, content=_error_body(e, 400))
@@ -299,13 +315,14 @@ async def reddit_mentions(req: MentionsRequest):
         "X-Terms-Failed": str(len(res.failed_terms)),
         "X-Truncated": "true" if res.truncated else "false",
         "X-Mobile-Posts": str(res.bodies_filled),
+        "X-Generic-Dropped": str(res.generic_dropped),
         # hits/threads per term in request order: comment hits the term's pages produced, and the
         # threads it was the first to find. Numbers only, as on /reddit.
         "X-Term-Counts": ",".join(f"{h}/{n}" for h, n in res.term_counts.values()),
     }
     log.info(
-        "ok mentions terms=%d threads=%d comments=%d bodies=%d failed_terms=%d %.1fs",
-        len(terms), len(results), sum(len(r["matched_comments"]) for r in results), res.bodies_filled, len(res.failed_terms), res.seconds,
+        "ok mentions terms=%d threads=%d comments=%d bodies=%d generic_dropped=%d failed_terms=%d %.1fs",
+        len(terms), len(results), sum(len(r["matched_comments"]) for r in results), res.bodies_filled, res.generic_dropped, len(res.failed_terms), res.seconds,
     )
     return JSONResponse(content={"query": " | ".join(terms), "results": results, "response_time": res.seconds}, headers=headers)
 

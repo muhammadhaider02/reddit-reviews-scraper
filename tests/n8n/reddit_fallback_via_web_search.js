@@ -99,7 +99,12 @@ try {
     body: {
       searchTerms: Array.isArray(b.reddit_search_terms) ? b.reddit_search_terms : [],
       query: query,
-      maxResults: 15
+      maxResults: 15,
+      // Corroboration for a multi-word brand name: without these, "Safe Hero" rescues Overwatch
+      // comments about "a very safe hero" and the gate cannot tell (the phrase IS in the text).
+      productKeywords: Array.isArray(b.product_keywords) ? b.product_keywords : [],
+      primaryProduct: String(b.primary_product || ''),
+      domain: String(b.domain_clean || '')
     }
   });
 } catch (e) {
