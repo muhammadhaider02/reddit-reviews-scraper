@@ -6,7 +6,7 @@ n8n is read-only for this project, so the workflow's Reddit logic is exercised h
 |---|---|
 | `sort_reddit_results.js` | verbatim `jsCode` of **Sort Reddit Results** |
 | `fetch_reddit_comments.js` | verbatim `jsCode` of **Fetch Reddit Comments** |
-| `reddit_fallback_via_web_search.js` | **Reddit Fallback Via Web Search** (workflow 02) with its Tavily call replaced by `POST /reddit/mentions`; the direction is reversed for this one: it is the code to paste INTO n8n, and becomes verbatim once the live node is updated |
+| `reddit_fallback_via_web_search.js` | **Reddit Fallback Via Web Search** (workflow 02), verbatim since 23 Sep 2026: the in-house `POST /reddit/mentions` call replaced Tavily. The same code runs in `scraper-testing` twice: in the Reddit lane after `Fetch Reddit Comments` (mirrors Stage 4; `Collect Results` reports `fallback_*`), and as `Reddit Fallback (Tavily baseline)` in the `Start Fallback Test` lane, which seeds the 14 brands Tavily rescued in stored Stage 4 executions with their real Parse Keywords output and diffs the kept threads against Tavily's (`Collect Fallback Results`). First runs 24 Sep 2026: executions 3691 (14 brands, 14 calls, 0 errors, 54 kept vs Tavily 23, mean 12.8 s, max 34.6 s) and 3694 (26 brands, 6 fallbacks fired, 0 errors, 46 rescued, all on-brand) |
 | `run_node.mjs` | runs one of those files with `$input` / `$()` stubbed |
 | `stage4_reddit_chain.py` | replays Search → Sort → IF → Comments → Fetch → Fallback against a running server (`--force-fallback` runs the last leg even when the outcome is `ok`) |
 

@@ -106,7 +106,7 @@ Not applied, and not to be applied without a decision. Recorded so the shape of 
 |---|---|
 | `Apify: Reddit Search` | URL → `http://reddit-reviews:8001/reddit`; authentication → the `reddit-scraper` Header Auth credential; drop the `maxTotalChargeUsd` and `timeout` query parameters. Body unchanged. |
 | `Apify: Reddit Comments` | same |
-| `Reddit Fallback Via Web Search` (Code node, workflow 02) | the `httpRequest` inside it → `POST http://reddit-reviews:8001/reddit/mentions` with `{ searchTerms, query, maxResults: 15 }`, no Authorization header (the route is open, see `MENTIONS_REQUIRE_TOKEN`); gate, mapping, outcome strings and the `tavily_calls` / `tavily_errors` keys stay, because `Build Run Telemetry` sums those by name. `tests/n8n/reddit_fallback_via_web_search.js` is the code to paste. |
+| `Reddit Fallback Via Web Search` (Code node, workflow 02) | done 23 Sep 2026 (version `8ec36b32`): the `httpRequest` inside it → `POST http://reddit-reviews:8001/reddit/mentions` with `{ searchTerms, query, maxResults: 15, productKeywords, primaryProduct, domain }`, no Authorization header (the route is open, see `MENTIONS_REQUIRE_TOKEN`); gate, mapping, outcome strings and the `tavily_calls` / `tavily_errors` keys stay, because `Build Run Telemetry` sums those by name. `tests/n8n/reddit_fallback_via_web_search.js` is the live code. Before any change to it or to the route, run `scraper-testing`'s `Start Fallback Test` lane (14 Tavily-baseline brands, real Parse Keywords output) and read `Collect Fallback Results`. |
 
 `Assess Vendors` gates on the Apify monthly limit; once Trustpilot and Reddit both leave Apify that gate protects nothing. Adding `reddit_search_terms` to the `Save Research Bundle` mapping would make future runs reproducible.
 
