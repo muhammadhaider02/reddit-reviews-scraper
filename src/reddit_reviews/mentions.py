@@ -1,16 +1,16 @@
 """Brand mentions inside Reddit COMMENTS, in the shape the Tavily fallback node reads.
 
-Workflow 02's `Reddit Fallback Via Web Search` ran one Tavily web search restricted to reddit.com
+The research workflow's `Reddit Fallback Via Web Search` node ran one Tavily web search restricted to reddit.com
 whenever the primary post search found nothing usable (about 1 brand in 3), and read only
 `results[].title`, `results[].url` and `results[].raw_content || content`. Its value was finding
 threads where the brand is named in a COMMENT, which the post search misses. Reddit's own comment
 search does that directly: `/svc/shreddit/search/?type=comments` is the same server-rendered
 partial the post search uses, fetched through the same browser, proxy pool and gate, and every
 card carries the matching comment's text, the post title, both ids, the subreddit, the time and
-the votes. Measured 23 Sep 2026 from the VPS: 2-5 s a page, and for Howdysnax exactly the three
+the votes. Measured 23 Sep 2026 from the server: 2-5 s a page, and for Zestbite exactly the three
 threads Tavily had found (r/Protein, r/OaklandFood, r/office). Unlike Tavily's `raw_content` the
 partial carries no page chrome, which is what produced Tavily's false brand matches ("Related
-Answers" naming Safe Hero on a Monster Hunter thread).
+Answers" naming Steady Guard on a Monster Hunter thread).
 
 The node slices the text it keeps to 900 characters, so `raw_content` leads with the matching
 comments and puts the post body (one `mobile.info` call for every thread at once) after them.
@@ -133,9 +133,9 @@ class MentionsResult:
 
 def _comment_text(body) -> str:
     """The comment's words, plus the address of every link in it. A brand is often named only in
-    the href ("apparently <a href=https://www.howdysnax.com/...>this shit is really good!</a>"),
+    the href ("apparently <a href=https://www.zestbite.com/...>this shit is really good!</a>"),
     and the node's gate reads text, so the link is rendered as `text (link: host/path)`. One of
-    the three Howdysnax threads Tavily found (r/office) is exactly this case."""
+    the three Zestbite threads Tavily found (r/office) is exactly this case."""
     text = _text(body)
     links: list[str] = []
     for a in body.css("a[href]"):
@@ -156,7 +156,7 @@ _TERM_SUFFIX = {"reviews", "review", "reddit"}
 
 def brand_of(terms: list[str]) -> str:
     """The brand name the terms share. Parse Keywords builds term 1 as the brand and the others as
-    that name plus a product or "reviews" ("Arq8", "Arq8 creatine gummies", "Arq8 reviews"), so
+    that name plus a product or "reviews" ("Vrx7", "Vrx7 creatine gummies", "Vrx7 reviews"), so
     the brand is the longest run of leading words every term starts with; a lone "Gymshark
     reviews" loses its trailing "reviews". Falls back to term 1 whole."""
     common = terms[0].split()
@@ -174,19 +174,19 @@ def brand_of(terms: list[str]) -> str:
 
 def names_brand_as_a_word(text: str, brand: str) -> bool:
     """Whether the comment names the brand as a word of its own, not as a run of letters inside
-    something opaque. Reddit's comment search matches "arq8" inside a Google Maps id
-    (maps.app.goo.gl/YHvb94R9M5EcbARq8), a YouTube id (youtu.be/L_pUxXhArq8), a Reddit share link
-    (/s/Wz2AenARQ8) and a Steam key (V24H-N7F24-ARQ8). The first production run after the Tavily
-    cutover (23 Sep 2026, execution 3335) kept 5 such threads of 8 for Arq8, and the node's gate
+    something opaque. Reddit's comment search matches "vrx7" inside a Google Maps id
+    (maps.app.goo.gl/YHvb94R9M5EcbVRx7), a YouTube id (youtu.be/L_pUxXhVRx7), a Reddit share link
+    (/s/Wz2AenVRX7) and a Steam key (V24H-N7F24-VRX7). The first production run after the Tavily
+    cutover (23 Sep 2026) kept 5 such threads of 8 for Vrx7, and the node's gate
     cannot tell, because the letters ARE in the text. So the brand must occur with nothing
     alphanumeric, `_` or `-` before it and nothing alphanumeric or `_` after it. That still
-    accepts "arq8's", "@arq8", "www.howdysnax.com" (r/office names Howdysnax only in an href,
-    rendered by _comment_text as a link host) and "kindwatersystems.com" for a spaced name."""
+    accepts "vrx7's", "@vrx7", "www.zestbite.com" (r/office names Zestbite only in an href,
+    rendered by _comment_text as a link host) and "clearstreamfilters.com" for a spaced name."""
     words = re.findall(r"[A-Za-z0-9]+", brand or "")
     if not words:
         return True
-    # The parts may be run together, spaced, or joined by punctuation: "blackmask.products",
-    # "blackmask products", "kindwatersystems", "Kind-Water-Systems".
+    # The parts may be run together, spaced, or joined by punctuation: "nightshade.products",
+    # "nightshade products", "clearstreamfilters", "Clear-Stream-Filters".
     pattern = r"(?<![A-Za-z0-9_-])" + r"[\s._'-]*".join(re.escape(w) for w in words) + r"(?:'?s)?(?![A-Za-z0-9_])"
     return re.search(pattern, text or "", re.IGNORECASE) is not None
 
@@ -272,29 +272,30 @@ _SENTENCE_END = ".!?:;\n\r\"'(“”‘’*-"
 class Corroboration:
     """What, beyond the phrase itself, says a comment is about THIS brand.
 
-    An exact-phrase search cannot tell "Safe Hero" the car-escape tool from "a very safe hero" in
-    an Overwatch thread, or "The Hero Company" from Hero pens, and the node's gate cannot either:
-    it reads text, and the phrase is in the text. Measured 23 Sep 2026 on the 14-brand Tavily
-    baseline: without this, Safe Hero rescued 15 gaming comments, The Hero Company 15, Exodus
-    Strong 12 (X-Men and Metro: Exodus), against 0 real mentions for all three. A one-word brand
-    (Howdysnax, Eskiin) needs none of this. For a multi-word one, a thread is kept when any of:
-      - the brand's first significant word is written capitalised mid-sentence ("Hercules
-        supplements", "Lyons leather co", "the Longevity store"), the proper-noun signal;
+    An exact-phrase search cannot tell a car-escape-tool brand whose name is two ordinary words from
+    those same two words in an Overwatch thread, or "The Beacon Company" from an unrelated product
+    of the same name, and the node's gate cannot either: it reads text, and the phrase is in the
+    text. Measured 23 Sep 2026 on the 14-brand Tavily baseline: without this, the two-ordinary-words
+    brand rescued 15 gaming comments, The Beacon Company 15, Summit
+    Strong 12 (comic and video-game threads), against 0 real mentions for all three. A one-word brand
+    (Zestbite, Lumora) needs none of this. For a multi-word one, a thread is kept when any of:
+      - the brand's first significant word is written capitalised mid-sentence ("Orion
+        supplements", "Marlow leather co", "the Evergreen store"), the proper-noun signal;
       - a product word from Parse Keywords' `primary_product` / `product_keywords` appears
         ("water softener", "mushroom gummies", "crossbody bag");
       - the brand's domain appears.
     Otherwise it is the phrase as ordinary words and it is dropped. It costs a lowercase mention
-    with no product word ("salt free kind water systems work well"): measured, 1 of 15.
+    with no product word ("salt free clear stream filters work well"): measured, 1 of 15.
 
     Two refinements from the third baseline run. The proper-noun form must be the phrase written
-    contiguously ("Hercules supplements", "the Longevity store"), because "Exodus, strong enough
-    of a telekinetic" and "closest to Exodus? Strongly disagree" had passed on the capital alone:
-    8 X-Men threads for a red-light-therapy brand. And a product word is a two-word phrase from
+    contiguously ("Orion supplements", "the Evergreen store"), because "Summit, strong enough
+    of a telekinetic" and "closest to Summit? Strongly disagree" had passed on the capital alone:
+    8 comic-book threads for a red-light-therapy brand. And a product word is a two-word phrase from
     the vocabulary ("water softener", "light therapy", "mushroom gummies") or a single word of six
     letters or more, because "light" on its own matched "in light of"."""
 
     brand_words: list[str]
-    first_word: str  # as written in the term, e.g. "Hercules"; "" when the term is lowercase
+    first_word: str  # as written in the term, e.g. "Orion"; "" when the term is lowercase
     product_words: set[str]  # two-word phrases, plus long single words
     domain: str
     phrase: "re.Pattern[str] | None" = None  # the brand written contiguously, first word as given
@@ -304,7 +305,7 @@ class Corroboration:
     def build(cls, brand: str, product_keywords: list[str] | None, primary_product: str | None, domain: str | None) -> "Corroboration | None":
         words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'.-]*", brand or "") if w.lower() not in STOPWORDS]
         if " " not in (brand or "").strip():
-            return None  # one token, "Howdysnax" or "blackmask.products": distinctive on its own
+            return None  # one token, "Zestbite" or "nightshade.products": distinctive on its own
         first = next((w for w in words if len(w) >= 3), "")
         if not first[:1].isupper():
             first = ""
@@ -323,12 +324,12 @@ class Corroboration:
         phrase = None
         if first:
             rest = [w for w in words[words.index(first) + 1:]]
-            # the first word keeps its case, the rest may be written any way: "Lyons leather co"
+            # the first word keeps its case, the rest may be written any way: "Marlow leather co"
             phrase = re.compile(r"\b" + re.escape(first) + "".join(r"\s+(?i:" + re.escape(w) + r"s?)" for w in rest) + r"\b")
         full = None
         caps = [w for w in words if w[:1].isupper()]
         if len(caps) >= 2 and caps == words:
-            # "Wild Woollys is not a local storefront": every word capitalised as the brand writes
+            # "Bramble Knits is not a local storefront": every word capitalised as the brand writes
             # it is the brand, wherever in the sentence it sits.
             full = re.compile(r"\b" + r"\s+".join(re.escape(w) + "s?" for w in words) + r"\b")
         return cls(brand_words=words, first_word=first, product_words=vocab, domain=dom, phrase=phrase, full=full)
@@ -357,11 +358,11 @@ def phrase_query(term: str, primary: str) -> str:
     """The comment-search query for a term: the brand name as an exact phrase.
 
     Unquoted, Reddit ranks comments that contain the words anywhere, and a three-word brand
-    loses: measured 23 Sep 2026, "Kind Water Systems" returned 10 comments about Savannah River
+    loses: measured 23 Sep 2026, "Clear Stream Filters" returned 10 comments about Savannah River
     and the Houthis with 0 carrying the phrase, while the quoted form returned 10 of 10 with it.
     Parse Keywords builds term 1 as the brand name and terms 2 and 3 as that name plus a product
     or "reviews", so the brand part is quoted and the rest is left loose for ranking:
-    `"Kind Water Systems" water filter`. A term that does not start with the brand is quoted whole."""
+    `"Clear Stream Filters" water filter`. A term that does not start with the brand is quoted whole."""
     term = term.strip().strip('"')
     primary = primary.strip().strip('"')
     if primary and term.lower() != primary.lower() and term.lower().startswith(primary.lower() + " "):

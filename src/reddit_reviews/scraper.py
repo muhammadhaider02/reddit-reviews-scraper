@@ -62,15 +62,15 @@ class RedditError(Exception):
 
 
 class ScrapeBlocked(RedditError):
-    """Reddit refused us (IP block, rate limit, interstitial). OUR problem, a vendor failure in Stage 4
-    terms, so the message must NOT contain '404', 'not found', 'no such page' or 'invalid url'
-    (Stage 4's BRAND_ERROR_RE would burn one of the brand's retries)."""
+    """Reddit refused us (IP block, rate limit, interstitial). OUR problem, a vendor failure in the
+    caller's terms, so the message must NOT contain '404', 'not found', 'no such page' or 'invalid url'
+    (the caller's brand-error check would burn one of the brand's retries)."""
 
     status = 503
 
 
 class ScrapeFailed(RedditError):
-    """Browser or network failure. Also a vendor failure from Stage 4's point of view."""
+    """Browser or network failure. Also a vendor failure from the caller's point of view."""
 
     status = 503
 
@@ -155,7 +155,7 @@ class ThreadsResult:
     missing: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     # As above. Deliberately NOT folded into `failed`: a thread we ran out of time for is not a
-    # thread Reddit refused, and Stage 4 treats those differently.
+    # thread Reddit refused, and the caller treats those differently.
     truncated: bool = False
     # Threads served by the mobile API rather than the browser. As above: the hybrid's receipt.
     mobile_threads: int = 0
@@ -177,7 +177,7 @@ def _text(node) -> str:
 
 def iso(ts: str | None) -> str:
     """Reddit writes `2026-04-23T04:06:19.598000+0000`. JavaScript's Date.parse is unreliable on the
-    6-digit fraction and colon-less offset, and Stage 4 ages posts with Date.parse, so normalise to
+    6-digit fraction and colon-less offset, and the caller ages posts with Date.parse, so normalise to
     `2026-04-23T04:06:19.598Z`."""
     raw = (ts or "").strip()
     if not raw:
@@ -229,7 +229,7 @@ def build_search_url(term: str, sort: str = "relevance", time_filter: str = "all
     sort = sort.lower() if sort and sort.lower() in SORTS else "relevance"
     time_filter = time_filter.lower() if time_filter and time_filter.lower() in TIMES else "all"
     # Reddit silently "corrects" unfamiliar words, and brand names are exactly those (it rewrote a made-up brand
-    # into "brand that doesn't exist" and served unrelated posts). Stage 4 relies on literal matching.
+    # into "brand that doesn't exist" and served unrelated posts). The caller relies on literal matching.
     params = {"q": term, "type": "posts", "sort": sort, "t": time_filter, "disableSpellCorrection": "true"}
     return BASE + SEARCH_PATH + "?" + urlencode(params)
 
@@ -411,7 +411,7 @@ def parse_thread(html: str, url: str = "") -> Thread:
 # ------------------------------------------------------- the same models, from the mobile route
 #
 # The browser reads attributes off rendered HTML; the app API hands back JSON. Both end up as the
-# same `Post` and `Comment`, because everything downstream - mapping.py, Stage 4's Code nodes -
+# same `Post` and `Comment`, because everything downstream - mapping.py, the caller's Code nodes -
 # must not be able to tell which route served a given item. That includes the small things: text is
 # whitespace-collapsed here exactly as `_text()` does it for HTML, so a body does not change shape
 # depending on which route fetched it.
@@ -419,7 +419,7 @@ def parse_thread(html: str, url: str = "") -> Thread:
 
 def _epoch_iso(ts) -> str:
     """Reddit's JSON dates its content with a UNIX float; the HTML carries a formatted string.
-    Both become the `...Z` form Stage 4 parses with Date.parse."""
+    Both become the `...Z` form the caller parses with Date.parse."""
     try:
         return datetime.fromtimestamp(float(ts), timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     except (TypeError, ValueError, OSError):
@@ -637,10 +637,10 @@ def search_term(
     `exclude` answers "which post ids did the earlier terms return"; it may block until those terms
     are final. It is asked once, after page 1 is in hand, so page 1 of every term is still fetched
     in parallel and only the decision to page on waits. Until 21 Sep 2026 each term filled its
-    quota on its own and the cross-term merge threw the overlap away afterwards: with Stage 4's
+    quota on its own and the cross-term merge threw the overlap away afterwards: with the caller's
     three terms per brand ("Brand", "Brand product", "Brand reviews") the second and third mostly
     returned what the first already had, and a brand landed on 20-25 distinct posts instead of 30
-    (GRIP6 10/8/6 -> 24, Vessel Golf 10/8/4 -> 22, eskiin 10/3/1 -> 14) while every term reported
+    (Talon9 10/8/6 -> 24, Harbor Golf 10/8/4 -> 22, lumora 10/3/1 -> 14) while every term reported
     a full 10. The quota is now filled after the overlap is set aside, page by page, within the
     same MAX_SEARCH_PAGES.
 
@@ -896,7 +896,7 @@ def fill_bodies(posts: list[Post], fetcher: Fetcher = fetch_html, deadline: floa
     Search results carry no post body (only a snippet, often from a comment), while the Apify actor returned
     the full body. `Sort Reddit Results` gates and scores on brand mentions in the body and the report prompt
     quotes it, so bodies matter. Best effort: a thread that fails, or is still queued when `deadline` passes,
-    keeps its snippet, so a busy server answers inside Stage 4's timeout.
+    keeps its snippet, so a busy server answers inside the caller's timeout.
 
     Returns (pages_fetched, truncated). `truncated` means at least one body was skipped for time -
     invisible otherwise, since a skipped post just keeps `body_is_snippet` and downstream cannot
@@ -955,7 +955,7 @@ def scrape_threads(
     canonical = canonical[: settings.max_threads]
     started = time.time()
     # Same budget as the search path. Up to MAX_THREADS urls queue on a gate of MAX_CONCURRENCY, so
-    # without this the last wave starts long after Stage 4's 250s node timeout has already given up.
+    # without this the last wave starts long after the caller's 250s node timeout has already given up.
     deadline = started + settings.scrape_budget_s
     outcomes: dict[str, Thread | RedditError] = {}
     skipped: list[str] = []
@@ -972,7 +972,7 @@ def scrape_threads(
     def run(u: str) -> None:
         if time.time() + _fetch_cost_s(ATTEMPTS) > deadline:
             # Not an error: we never asked Reddit. Recording it in `failed` would make a clock
-            # decision look like a vendor refusal to Stage 4.
+            # decision look like a vendor refusal to the caller.
             with lock:
                 skipped.append(u)
             return

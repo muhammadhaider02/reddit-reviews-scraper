@@ -1,4 +1,4 @@
-"""Self-hosted Reddit scraper, a drop-in for the Apify actor used by the Stage 4 workflow."""
+"""Self-hosted Reddit scraper, a drop-in for the Apify actor used by an n8n research workflow."""
 
 import argparse
 import json

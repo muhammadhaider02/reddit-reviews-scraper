@@ -1,4 +1,4 @@
-"""Shape scraped posts and comments the way Stage 4 already reads the Apify actor's dataset items.
+"""Shape scraped posts and comments the way the research workflow already reads the Apify actor's dataset items.
 
 `Sort Reddit Results` reads, per post:
   dataType ('post'), title, body, communityName|subredditName, createdAt, commentsCount, score|upVotes,
@@ -70,7 +70,7 @@ def comment_item(c: Comment) -> dict:
 def mention_item(t: MentionThread) -> dict:
     """One thread in the shape Tavily's `results[]` had. The node reads `title`, `url` and
     `raw_content || content`; everything else is for logs, the acceptance comparison, and a future
-    where rescued threads carry real metadata (which needs the owner's sign-off, see tavily.md)."""
+    where rescued threads carry real metadata."""
     comments = [c.text for c in t.comments if c.text]
     raw = "\n\n".join(comments)
     if t.body:

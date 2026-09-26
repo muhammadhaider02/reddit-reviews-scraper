@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 from reddit_reviews import api
 from reddit_reviews.scraper import ScrapeBlocked, SearchResult, ThreadsResult, parse_search, parse_thread
 
-# Stage 4's `Apify: Reddit Search` body, verbatim apart from the expression being resolved.
-STAGE4_SEARCH_BODY = {
+# The research workflow's `Apify: Reddit Search` request body, verbatim apart from the expression being resolved.
+SEARCH_BODY = {
     "searchTerms": ["Gymshark", "Gymshark gym clothes", "Gymshark reviews"],
     "searchPosts": True,
     "searchComments": False,
@@ -22,8 +22,8 @@ STAGE4_SEARCH_BODY = {
     "proxy": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
 }
 
-# Stage 4's `Apify: Reddit Comments` body.
-STAGE4_COMMENTS_BODY = {
+# The research workflow's `Apify: Reddit Comments` request body.
+COMMENTS_BODY = {
     "startUrls": [
         {"url": "https://www.reddit.com/r/Gymshark/comments/1st816z/best_gymshark_tops_review/"},
         {"url": "https://www.reddit.com/r/gymsnark/comments/1pjz4rg/should_i_buy_gymshark_or_not_is_the_quality_good/"},
@@ -37,7 +37,7 @@ STAGE4_COMMENTS_BODY = {
     "proxy": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
 }
 
-# The exact field lookups the Stage 4 Code nodes perform.
+# The exact field lookups the research workflow's Code nodes perform.
 SORT_NODE_POST_FIELDS = {"dataType", "title", "body", "communityName", "createdAt", "commentsCount", "score", "parsedId", "postUrl"}
 FETCH_NODE_COMMENT_FIELDS = {"dataType", "body", "commentCreatedAt", "score", "subredditName"}
 
@@ -57,8 +57,8 @@ def canned_mentions(*_a, **_k):
     from reddit_reviews.mentions import phrase_query, search_mentions
     from reddit_reviews.scraper import build_comment_search_url
 
-    site = FakeReddit({build_comment_search_url(phrase_query("Howdysnax", "Howdysnax")): (200, fixture("search_comments_howdysnax.html"))})
-    return search_mentions(["Howdysnax"], fetcher=site)
+    site = FakeReddit({build_comment_search_url(phrase_query("Zestbite", "Zestbite")): (200, fixture("search_comments_zestbite.html"))})
+    return search_mentions(["Zestbite"], fetcher=site)
 
 
 def canned_threads(*_a, **_k):
@@ -66,7 +66,7 @@ def canned_threads(*_a, **_k):
     return ThreadsResult(threads=threads, pages_fetched=2, seconds=2.0)
 
 
-def test_stage4_search_body_verbatim(client, monkeypatch):
+def test_workflow_search_body_verbatim(client, monkeypatch):
     seen = {}
 
     def fake(terms, max_posts, sort, time_filter, include_nsfw, full_bodies=None):
@@ -74,7 +74,7 @@ def test_stage4_search_body_verbatim(client, monkeypatch):
         return canned_search()
 
     monkeypatch.setattr(api, "scrape_search", fake)
-    r = client.post("/reddit?maxTotalChargeUsd=0.35&timeout=280", json=STAGE4_SEARCH_BODY)
+    r = client.post("/reddit?maxTotalChargeUsd=0.35&timeout=280", json=SEARCH_BODY)
     assert r.status_code == 200
     assert seen == {
         "terms": ["Gymshark", "Gymshark gym clothes", "Gymshark reviews"],
@@ -90,7 +90,7 @@ def test_stage4_search_body_verbatim(client, monkeypatch):
     assert r.headers["X-Pages-Fetched"] == "1"
 
 
-def test_stage4_comments_body_verbatim(client, monkeypatch):
+def test_workflow_comments_body_verbatim(client, monkeypatch):
     seen = {}
 
     def fake(urls, per_post, total):
@@ -98,9 +98,9 @@ def test_stage4_comments_body_verbatim(client, monkeypatch):
         return canned_threads()
 
     monkeypatch.setattr(api, "scrape_threads", fake)
-    r = client.post("/reddit", json=STAGE4_COMMENTS_BODY)
+    r = client.post("/reddit", json=COMMENTS_BODY)
     assert r.status_code == 200
-    assert seen == {"urls": [u["url"] for u in STAGE4_COMMENTS_BODY["startUrls"]], "per_post": 20, "total": 160}
+    assert seen == {"urls": [u["url"] for u in COMMENTS_BODY["startUrls"]], "per_post": 20, "total": 160}
     items = r.json()
     posts = [i for i in items if i["dataType"] == "post"]
     comments = [i for i in items if i["dataType"] == "comment"]
@@ -169,7 +169,7 @@ def test_blocked_is_503_with_error_item(client, monkeypatch):
     assert r.status_code == 503
     body = r.json()
     assert body["error"]["type"] == "ScrapeBlocked"
-    # Stage 4 spots a failed request as ONE item carrying error|message and no dataType/title.
+    # The research workflow spots a failed request as ONE item carrying error|message and no dataType/title.
     assert "dataType" not in body and "title" not in body
 
 
@@ -222,10 +222,10 @@ def test_health_counters(client, monkeypatch):
 
 def test_mentions_response_shape(client, monkeypatch):
     monkeypatch.setattr(api, "search_mentions", canned_mentions)
-    r = client.post("/reddit/mentions", json={"searchTerms": ["Howdysnax", "Howdysnax reviews"], "maxResults": 15})
+    r = client.post("/reddit/mentions", json={"searchTerms": ["Zestbite", "Zestbite reviews"], "maxResults": 15})
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"query", "results", "response_time"} and body["query"] == "Howdysnax | Howdysnax reviews"
+    assert set(body) == {"query", "results", "response_time"} and body["query"] == "Zestbite | Zestbite reviews"
     assert len(body["results"]) == 3
     for item in body["results"]:
         assert {"title", "url", "content", "raw_content"} <= set(item)
@@ -242,8 +242,8 @@ def test_mentions_accepts_the_pipe_query_and_prefers_terms(client, monkeypatch):
         return canned_mentions()
 
     monkeypatch.setattr(api, "search_mentions", fake)
-    assert client.post("/reddit/mentions", json={"query": "Safe Hero | Safe Hero car escape tool | Safe Hero reviews"}).status_code == 200
-    assert seen["terms"] == ["Safe Hero", "Safe Hero car escape tool", "Safe Hero reviews"] and seen["max_results"] == 15
+    assert client.post("/reddit/mentions", json={"query": "Steady Guard | Steady Guard car escape tool | Steady Guard reviews"}).status_code == 200
+    assert seen["terms"] == ["Steady Guard", "Steady Guard car escape tool", "Steady Guard reviews"] and seen["max_results"] == 15
     assert client.post("/reddit/mentions", json={"reddit_search_terms": ["A", "B"], "reddit_query": "C | D", "maxResults": 5}).status_code == 200
     assert seen["terms"] == ["A", "B"] and seen["max_results"] == 5
 

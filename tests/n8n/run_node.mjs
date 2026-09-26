@@ -1,4 +1,4 @@
-// Runs a Stage 4 n8n Code node locally against this service's output, since n8n itself is read-only.
+// Runs one of the research workflow's n8n Code nodes locally against this service's output.
 //
 //   node tests/n8n/run_node.mjs sort     <upstream.json> <items.json>
 //   node tests/n8n/run_node.mjs comments <sort-output.json> <items.json>
@@ -6,11 +6,11 @@
 //
 // <upstream.json> is the single JSON item the node reads through $('Parse Keywords') or
 // $('Sort Reddit Results'); <items.json> is the HTTP node's output (the array this service returns).
-// `fallback` runs `Reddit Fallback Via Web Search` (workflow 02), which makes its own HTTP call:
+// `fallback` runs `Reddit Fallback Via Web Search`, which makes its own HTTP call:
 // <fetch-output.json> is its input item and <mentions-response.json> is what the stubbed
 // `this.helpers.httpRequest` resolves with - or `{"__status": 503, ...}` / `{"__throw": "..."}` to make
 // it throw the way n8n does on a non-2xx. The output carries a `__request` key with the call it made.
-// The .js files next to this script are verbatim copies of the node code; see README.md in this folder.
+// The .js files next to this script are copies of the node code; see README.md in this folder.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

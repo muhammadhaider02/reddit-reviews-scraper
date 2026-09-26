@@ -1,6 +1,6 @@
 """HTTP surface n8n calls in place of Apify's harshmaur~reddit-scraper run-sync-get-dataset-items endpoint.
 
-POST /reddit  -> JSON array of dataset items, same names Stage 4's Code nodes read from Apify
+POST /reddit  -> JSON array of dataset items, same names the caller's Code nodes read from Apify
                  body with `searchTerms` -> post search   (replaces `Apify: Reddit Search`)
                  body with `startUrls`   -> thread + comments (replaces `Apify: Reddit Comments`)
 POST /reddit/mentions -> {query, results: [{title, url, content, raw_content, ...}], response_time}
@@ -9,7 +9,7 @@ POST /reddit/mentions -> {query, results: [{title, url, content, raw_content, ..
                  default because a Code node cannot carry a credential, see MENTIONS_REQUIRE_TOKEN)
 GET  /health  -> counters
 
-Error contract, matched to Stage 4:
+Error contract, matched to the calling workflow:
   200 []                 nothing found -> `Sort Reddit Results` reports no_results, Tavily fallback runs
   200 [partial]          some terms/threads failed but others worked -> use what we have
   400 {"error": {...}}   neither searchTerms nor startUrls
@@ -93,7 +93,7 @@ app = FastAPI(title="reddit-reviews", version=__version__, lifespan=lifespan)
 
 
 class RedditRequest(BaseModel):
-    """The Apify actor's input fields, so Stage 4's existing bodies work unchanged. Unknown fields
+    """The Apify actor's input fields, so the caller's existing bodies work unchanged. Unknown fields
     (proxy, searchComments, maxCommunitiesCount, ...) are ignored."""
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
@@ -136,7 +136,7 @@ class RedditRequest(BaseModel):
     @field_validator("max_posts", mode="before")
     @classmethod
     def _clamp_posts(cls, v):
-        # Stage 4's comments call sends maxPostsCount = number of targets, which can be 0 on paper.
+        # The caller's comments call sends maxPostsCount = number of targets, which can be 0 on paper.
         n = int(v) if str(v).strip().lstrip("-").isdigit() else 10
         return min(max(n, 1), 50)
 

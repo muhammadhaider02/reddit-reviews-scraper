@@ -1,5 +1,5 @@
-// STEP 1 OF 2: rank the posts only. No comments fetched yet - the old design
-// pulled comments from all 30 posts when only a handful were about the brand.
+// Sort Reddit Results. Step 1 of 2: score and filter the posts from the Reddit
+// search, and pick the few strong threads worth fetching comments from.
 const b = $('Parse Keywords').first().json;
 const items = $input.all().map(i => i.json);
 const tokens = (b.brand_match_tokens || []).map(t => String(t || '').toLowerCase()).filter(Boolean);
@@ -26,7 +26,7 @@ const brandHits = (txt) => {
 
 // Communities that are not customers. Counterfeit and dupe marketplaces name
 // brands constantly and tell us nothing about the real product; snark and
-// puzzle subs are not buyers either. DHgate slipped through the first version.
+// puzzle subs are not buyers either.
 const BAD_SUB = /(fashionreps|repladies|reps?buy|designerreps|dhgate|aliexpress|taobao|pandabuy|superbuy|cnfans|hagobuy|kakobuy|weidian|dupe|superfake|wholesal|snark|fauxmoi|blogsnark|saintmeghanmarkle|influencersnark|celebritynumber|deals?$|freebies|coupon|dropship|flipping|testimonial)/i;
 
 // Titles that give away replica or resale intent even in a normal community.
@@ -63,9 +63,9 @@ for (const p of rawPosts) {
   const bodyHits = brandHits(body);
 
   // HARD GATE. Bonuses for buying-intent words, recency and busy threads must
-  // never carry a post that does not mention the brand at all. Without this a
-  // Super Mario movie review thread scored 4 on Colorful Standard purely from
-  // "Review" + recent + 2550 comments.
+  // never carry a post that does not mention the brand at all. Without this an
+  // unrelated movie review thread can score 4 purely from "Review" + recent +
+  // thousands of comments.
   if (titleHits === 0 && bodyHits === 0) {
     postsRejected++; rejectReasons.no_brand_mention++; continue;
   }

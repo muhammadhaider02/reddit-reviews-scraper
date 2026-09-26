@@ -6,13 +6,13 @@ Reddit's *web* search (`/svc/shreddit/search/`, what the browser reads) and the 
 (`oauth.reddit.com/search`) are different indexes, not one index sorted two ways. Measured
 18 Sep 2026 across three brands, the app's top-100 contained 2 of the 30 posts the web search put
 in its top-10 - and across 103 brands the two routes agreed on well under half the posts. So the app
-cannot serve search without changing what Stage 4 reads.
+cannot serve search without changing what the caller reads.
 
 A full-mobile search route was built behind a flag and measured over the same 103 brands, hours
 apart: 7.2% post overlap with the web index, the same share of posts naming the brand, and less
 than half the usable comment material (606 vs 1,388 comments naming the brand), because the app
 index finds threads that merely mention a brand while the web index finds threads ABOUT it. It
-was removed on 19 Sep 2026: Stage 4 quotes comments to founders, and the web search now costs
+was removed on 19 Sep 2026: the research workflow quotes comments in its reports, and the web search now costs
 about half a cent per brand. This module reads by id only.
 
 Fetching a post or its comments BY ID involves no ranking at all, and there the app API is
@@ -26,7 +26,7 @@ on client identity instead, and that identity is a public constant baked into ev
 The unit of identity is a "device", not a request: one User-Agent, two UUIDs, one qos figure, the
 token minted with them, and the loid/session pair Reddit returned. Never mix parts between
 devices - a token minted under one User-Agent and used under another is exactly the inconsistency
-worth fingerprinting. One call from Stage 4 leases one device for all of its sub-requests, so
+worth fingerprinting. One call from the caller leases one device for all of its sub-requests, so
 Reddit sees one phone reading about one brand.
 
 Transport only, by design: it returns Reddit's raw JSON and imports nothing from `scraper`, which

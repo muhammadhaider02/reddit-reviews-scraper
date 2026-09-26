@@ -4,7 +4,7 @@ What the service replaces, why it is built the way it is, and the measurements e
 
 ## What it replaces
 
-The research stage of the SmartLead pipeline, n8n workflow **02 · Learn About The Brand** (`LlXYr9cMoypAFYA4`), made two calls per brand to the Apify actor `harshmaur~reddit-scraper`:
+The research workflow of an n8n brand-research pipeline made two calls per brand to the Apify actor `harshmaur~reddit-scraper`:
 
 | Node | Purpose | Fires |
 |---|---|---|
@@ -17,15 +17,15 @@ What the workflow does with the rows decides most of the design here:
 
 - **`Sort Reddit Results`** drops posts from rep, dupe and coupon subreddits and posts whose title reads as a listing, then requires a brand token in the title or body. Survivors are scored on title hits, review intent, age and comment count; score 3 keeps, score 4 with a title hit is *strong*. Up to 8 strong posts with comments become the comment targets.
 - **`Fetch Reddit Comments`** drops `[removed]`, `[deleted]`, comments under 6 words and comments older than 5 years, flags the ones that name the brand and keeps up to 200.
-- The **outcome** it sets is the field that judges a scraper: `request_failed` (the search call errored), `no_results` (zero raw posts), `all_irrelevant` (posts, none survived), `thin` (no strong post, or fewer than 8 kept posts plus comments), `ok`. Empty or thin sends the brand to the comment-search fallback (`POST /reddit/mentions`, below), which replaced the Tavily web search on 23 Sep 2026.
+- The **outcome** it sets is the field that judges a scraper: `request_failed` (the search call errored), `no_results` (zero raw posts), `all_irrelevant` (posts, none survived), `thin` (no strong post, or fewer than 8 kept posts plus comments), `ok`. Empty or thin sends the brand to the comment-search fallback (`POST /reddit/mentions`, below), which replaced a Tavily web search.
 
 Three consequences. A post with an empty `body` cannot pass the brand gate on its body, so bodies must be full text, not the search snippet. An error must arrive as an object with `error` and no `dataType`, because that is what the failure detection looks for. And a call that returns zero posts because it ran out of time is indistinguishable downstream from a brand nobody discusses, which is why the time budget below never skips the first page.
 
 ## Search: a browser through a residential proxy
 
-Reddit blocks by IP. Measured 17 Sep 2026 from the VPS: `curl`, Scrapling's Chromium and Camoufox's Firefox all get the same 403 block page for the same URL (`You've been blocked by network security`; 190,240 and 190,292 bytes), while a residential exit gets `200` the same second. Three clients from "no fingerprint" to "full stealth Firefox" treated identically means the block lands before fingerprinting, so a better browser would not help and none was tried.
+Reddit blocks by IP. Measured from a datacenter host: `curl`, Scrapling's Chromium and Camoufox's Firefox all get the same 403 block page for the same URL (`You've been blocked by network security`; 190,240 and 190,292 bytes), while a residential exit gets `200` the same second. Three clients from "no fingerprint" to "full stealth Firefox" treated identically means the block lands before fingerprinting, so a better browser would not help and none was tried.
 
-Reddit's public JSON endpoints (`/search.json`, `/comments/<id>.json`) answer the same 403 to plain HTTP clients and to the stealth browser alike. The server-rendered web pages answer through a residential exit, and they carry the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`). The service reads those with Scrapling's stealth Chromium through the proxy, following the search cursor for up to `MAX_SEARCH_PAGES` pages per term (7 or 14 posts a page). A term pages on until it holds `maxPostsCount` posts that no earlier term in the same request returned: page 1 of every term is fetched in parallel, then each term waits for the terms before it to be final before deciding whether it needs page 2. That is what makes three overlapping terms reach ~30 distinct posts instead of ~22 (measured 21 Sep 2026; `docs/api.md` has the numbers).
+Reddit's public JSON endpoints (`/search.json`, `/comments/<id>.json`) answer the same 403 to plain HTTP clients and to the stealth browser alike. The server-rendered web pages answer through a residential exit, and they carry the data in element attributes (`search-telemetry-tracker`, `shreddit-post`, `shreddit-comment`). The service reads those with Scrapling's stealth Chromium through the proxy, following the search cursor for up to `MAX_SEARCH_PAGES` pages per term (7 or 14 posts a page). A term pages on until it holds `maxPostsCount` posts that no earlier term in the same request returned: page 1 of every term is fetched in parallel, then each term waits for the terms before it to be final before deciding whether it needs page 2. That is what makes three overlapping terms reach ~30 distinct posts instead of ~22 ([api.md](api.md) has the numbers).
 
 ## Bodies and comments: Reddit's own app API
 
@@ -42,7 +42,7 @@ Measured on one brand, same terms, minutes apart:
 
 One device serves one call end to end, paced at `MOBILE_SPACING_S` plus jitter, under Reddit's 100 requests per 10 minutes per token. The body fill is all-or-nothing: if the route cannot answer, the browser does every body, because a partial fallback would quietly put ~25 proxied pages back on the bill. The thread fill falls back per thread, because a thread costs one page either way.
 
-**This route is proxied too.** On 18 Sep 2026, about a day after minting ~25 tokens from the VPS, Reddit blocked its IP from `oauth.reddit.com` outright. Measured that afternoon: a direct mint returns the block page, a mint through a residential exit returns a token, and that token is still refused when used directly. So every call on this route leaves through the proxy, and each device holds one sticky exit for its whole life. The bandwidth case survives: ~270 KB of API calls per brand instead of ~29 browser pages.
+**This route is proxied too.** About a day after ~25 tokens were minted from the datacenter host, Reddit blocked its IP from `oauth.reddit.com` outright. Measured that afternoon: a direct mint returns the block page, a mint through a residential exit returns a token, and that token is still refused when used directly. So every call on this route leaves through the proxy, and each device holds one sticky exit for its whole life. The bandwidth case survives: ~270 KB of API calls per brand instead of ~29 browser pages.
 
 ## Why search does not use the app API
 
@@ -57,15 +57,15 @@ The app's search (`oauth.reddit.com/search`) is a different index, not a cheaper
 | Brands with nothing usable | 6 | 15 |
 | Proxy cost, 103 brands | $0.54 | $0.00 |
 
-The app index finds threads that merely mention a brand; the web index finds threads about it, which is where the quotable comments are. The route was removed on 19 Sep 2026. `MOBILE_ENABLED=false` still falls everything back to the browser.
+The app index finds threads that merely mention a brand; the web index finds threads about it, which is where the quotable comments are. The route was removed. `MOBILE_ENABLED=false` still falls everything back to the browser.
 
 ## Comment search: the fallback
 
-When the outcome above is not `ok`, workflow 02's `Reddit Fallback Via Web Search` node gives the brand a second route before it is marked Failed. Until 23 Sep 2026 that was one Tavily web search restricted to reddit.com (about 1 brand in 3, 12-15 s, a key hardcoded in the node). What Tavily actually contributed was threads where the brand is named **in a comment**: the post search matches titles and bodies, and a brand that only ever comes up in replies ("You can find it on howdysnax.com") never surfaces there.
+When the outcome above is not `ok`, the research workflow's `Reddit Fallback Via Web Search` Code node gives the brand a second route. That was one Tavily web search restricted to reddit.com (about 1 brand in 3, 12-15 s). What Tavily actually contributed was threads where the brand is named **in a comment**: the post search matches titles and bodies, and a brand that only ever comes up in replies ("You can find it on zestbite.com") never surfaces there.
 
-Reddit's own comment search is the same server-rendered partial as the post search with `type=comments`, fetched through the same browser, proxy pool and gate. Every card carries the matching comment's text, the post title, both ids, the subreddit, the comment's time and votes, and the post's counter row. `mentions.py` runs the three terms in parallel with the brand name quoted as an exact phrase (unquoted, a three-word brand returned 0 of 10 comments carrying it; quoted, 10 of 10), one page each, follows a term's cursor only while the merged threads are still under `maxResults` and a fetch plus the body fill fit inside `MENTIONS_BUDGET_S`, merges by thread (first term to find it owns it, every term's comments are kept), drops threads where a multi-word brand name is only ever used as ordinary words (no capitalised proper-noun use mid-sentence, no product word from Parse Keywords, no domain: "a very safe hero" in an Overwatch thread), drops comment hits where the brand is only a run of letters inside an opaque id or key (Reddit matched "arq8" inside a Google Maps id, a YouTube id, a Reddit share link and a Steam key on the first production run, execution 3335), then fills the post bodies with one `/api/info` call bounded by whatever time is left. Measured from the VPS: 2-5 s a page, ~10 s a brand, and for Howdysnax the exact three threads Tavily had found. The partial carries no page chrome, which is what had produced Tavily's false brand matches ("Related Answers" naming Safe Hero on a Monster Hunter thread).
+Reddit's own comment search is the same server-rendered partial as the post search with `type=comments`, fetched through the same browser, proxy pool and gate. Every card carries the matching comment's text, the post title, both ids, the subreddit, the comment's time and votes, and the post's counter row. `mentions.py` runs the three terms in parallel with the brand name quoted as an exact phrase (unquoted, a three-word brand returned 0 of 10 comments carrying it; quoted, 10 of 10), one page each, follows a term's cursor only while the merged threads are still under `maxResults` and a fetch plus the body fill fit inside `MENTIONS_BUDGET_S`, merges by thread (first term to find it owns it, every term's comments are kept), drops threads where a multi-word brand name is only ever used as ordinary words (no capitalised proper-noun use mid-sentence, no product word from the keyword step, no domain: the two words used as ordinary gamer slang in an Overwatch thread), drops comment hits where the brand is only a run of letters inside an opaque id or key (Reddit matched "vrx7" inside a Google Maps id, a YouTube id, a Reddit share link and a Steam key on the first production run), then fills the post bodies with one `/api/info` call bounded by whatever time is left. Measured from a datacenter host: 2-5 s a page, ~10 s a brand, and for one test brand the exact three threads Tavily had found. The partial carries no page chrome, which is what had produced Tavily's false brand matches (a "Related Answers" box naming a brand on a Monster Hunter thread).
 
-The response keeps Tavily's shape (`results[].title / url / content / raw_content`) so the node's gate, mapping and outcome strings are unchanged, and `raw_content` leads with the matching comments because the node keeps the first 900 characters. The route is open by default (`MENTIONS_REQUIRE_TOKEN`): a Code node cannot carry a credential and nothing outside the docker network can reach the container.
+The response keeps Tavily's shape (`results[].title / url / content / raw_content`) so the node's gate, mapping and outcome strings are unchanged, and `raw_content` leads with the matching comments because the node keeps the first 900 characters. The route is open by default (`MENTIONS_REQUIRE_TOKEN`): a Code node cannot carry a credential and nothing outside the Docker network can reach the container.
 
 ## The proxy
 
@@ -80,7 +80,7 @@ The response keeps Tavily's shape (`results[].title / url / content / raw_conten
 
 ## The time budget
 
-Stage 4's nodes time out at 290 s (search) and 250 s (comments). Nothing cancels a handler when the caller gives up, so a call that overruns keeps a browser busy for nobody. `SCRAPE_BUDGET_S` (200) bounds the whole call: before starting a page, a body or a thread the service checks that a full fetch's worst case (`attempts × FETCH_TIMEOUT_MS + retry delay`) still fits, and otherwise returns what it has with `X-Truncated: true`. The first search page is never skipped, for the reason given above. `docker-compose.yml`'s `stop_grace_period` (210 s) is this budget plus Chromium teardown, so a redeploy does not kill in-flight scrapes.
+The workflow's nodes time out at 290 s (search) and 250 s (comments). Nothing cancels a handler when the caller gives up, so a call that overruns keeps a browser busy for nobody. `SCRAPE_BUDGET_S` (200) bounds the whole call: before starting a page, a body or a thread the service checks that a full fetch's worst case (`attempts × FETCH_TIMEOUT_MS + retry delay`) still fits, and otherwise returns what it has with `X-Truncated: true`. The first search page is never skipped, for the reason given above. `docker-compose.yml`'s `stop_grace_period` (210 s) is this budget plus Chromium teardown, so a redeploy does not kill in-flight scrapes.
 
 ## Memory and concurrency
 
@@ -88,20 +88,20 @@ Scrapling launches a full Chromium per fetch and tears it down, so memory is spi
 
 ## Measured against Apify
 
-The only brands with a real Apify result still stored are 26 bundles in the pipeline's data table. Run through the n8n test workflow with Stage 4's own Code nodes on 19 Sep 2026, one brand at a time:
+26 brands with a stored Apify result, run through an n8n test-harness workflow with the research workflow's own Code nodes, one brand at a time:
 
 | | Hybrid | Apify |
 |---|---|---|
 | Brands `ok` | 21 | 21 |
 | Posts found | 570 | 699 |
-| Posts kept after Stage 4's filter | 165 | 247 |
+| Posts kept after the workflow's filter | 165 | 247 |
 | Threads read | 119 | 119 |
 | Comments kept | 1,210 | 1,339 |
 | Request failures | 0 | |
 | Wall clock | 31 s per brand | |
 | Proxy bandwidth | 5.8 MB per brand, ~$0.15 for the run | |
 
-The kept-posts gap is mostly the test harness: it builds brand tokens from the sheet name and domain, while the real Parse Keywords adds Claude's `brand_keywords` (the spaced spellings Reddit uses, "Lacrosse Unlimited", "Six Zero"). Replaying Stage 4's Sort node with one such token per brand recovered 42 of the 82 missing posts across six brands. Search terms are a reconstruction too, because the pipeline does not store them. The set is golf, pickleball and fitness, which Reddit covers unusually well; over the 103-brand skincare and wellness sheet the hybrid landed 58 `ok`, 38 `all_irrelevant`, 7 `thin`, again with zero failures, at 4.7 MB per brand.
+The kept-posts gap is mostly the harness: it builds brand tokens from the brand name and domain, while the real keyword step adds the spaced spellings Reddit uses ("Brand Name" for "BrandName"). Replaying the Sort node with one such token per brand recovered 42 of the 82 missing posts across six brands. Search terms are a reconstruction too, because the pipeline does not store them. The set is golf, pickleball and fitness, which Reddit covers unusually well; over 103 skincare and wellness brands the hybrid landed 58 `ok`, 38 `all_irrelevant`, 7 `thin`, again with zero failures, at 4.7 MB per brand.
 
 ## Layout
 
@@ -115,7 +115,7 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | `api.py` | FastAPI surface, counters, the startup egress probe |
 | `config.py` | environment |
 
-`tests/fixtures/` are real Reddit pages with styles, scripts and SVGs stripped; refresh them if Reddit changes its markup. `tests/n8n/` holds verbatim copies of `Sort Reddit Results` and `Fetch Reddit Comments` and a runner that executes them with `$input` and `$()` stubbed, so the workflow's own JavaScript runs in the test suite against this service's output. `tests/n8n/stage4_reddit_chain.py` replays the whole chain against a running server.
+`tests/fixtures/` are real Reddit pages with styles, scripts and SVGs stripped; refresh them if Reddit changes its markup. `tests/n8n/` holds verbatim copies of `Sort Reddit Results` and `Fetch Reddit Comments` and a runner that executes them with `$input` and `$()` stubbed, so the workflow's own JavaScript runs in the test suite against this service's output. `tests/n8n/research_reddit_chain.py` replays the whole chain against a running server.
 
 ## Configuration (environment variables)
 
@@ -124,7 +124,7 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | Variable | Default | Meaning |
 |---|---|---|
 | `API_TOKEN` | *(empty)* | Bearer token callers must send. Empty disables auth and logs a warning; local testing only. |
-| `SCRAPER_PROXY` | *(empty)* | Residential proxy, as a URL or `host:port:user:pass`. A sticky port; the rotating gateways (7000, 823) are refused. |
+| `SCRAPER_PROXY` | *(empty)* | Residential proxy, as a URL or `host:port:user:pass`. A sticky port; the rotating gateways (7000, 823) are refused. Empty logs a warning and fetches from the host's own IP, which Reddit blocks on a datacenter host. |
 | `MAX_CONCURRENCY` | `3` | Browser fetches in flight across all requests. Sized against `mem_limit`. |
 | `FETCH_TIMEOUT_MS` | `45000` | Per-page browser timeout. |
 | `BLOCK_RESOURCES` | `true` | Block images, fonts, CSS and media in the browser. |
@@ -133,11 +133,11 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | `MAX_BODY_FETCHES` | `30` | Bodies filled per search call. |
 | `SCRAPE_BUDGET_S` | `200` | Wall-clock budget for one call. Keep under 250 and under `stop_grace_period`. |
 | `MAX_THREADS` | `10` | Thread links read per call, whatever the caller sends. |
-| `RETRY_DELAY_S` | `2` | Pause before the one retry of a refused page. A refusal is a non-200, a page carrying a block marker, or since 21 Sep 2026 a 200 that is not a Reddit document at all (no `redditstatic.com`, no `<shreddit-` element): a proxy's `Gateway` page came back that way and had been read as "no posts". |
+| `RETRY_DELAY_S` | `2` | Pause before the one retry of a refused page. A refusal is a non-200, a page carrying a block marker, or a 200 that is not a Reddit document at all (no `redditstatic.com`, no `<shreddit-` element): a proxy's `Gateway` page came back that way and had been read as "no posts". |
 | `MENTIONS_BUDGET_S` | `30` | Wall clock for one `/reddit/mentions` call; the node gives it 45 s. |
 | `MENTIONS_FETCH_TIMEOUT_MS` | `10000` | Per-page browser timeout on that route (measured 2-5 s a page). |
 | `MENTIONS_MAX_PAGES` | `2` | Cursor pages per term on that route. |
-| `MENTIONS_REQUIRE_TOKEN` | `false` | Put the bearer check on `/reddit/mentions` too. Off because the caller is a Code node. |
+| `MENTIONS_REQUIRE_TOKEN` | `false` | Put the bearer check on `/reddit/mentions` too. Off because the caller is a Code node. Reported by `/health` as `mentions_auth`. |
 | `MOBILE_ENABLED` | `true` | Kill switch for the app route. Off means the browser does bodies and threads at ~20x the bandwidth. |
 | `MOBILE_DEVICES` | `3` | Devices in flight at once; caps concurrent calls on the route. |
 | `MOBILE_MIN_BUDGET` | `10` | Re-mint when a token's 100-per-10-minutes budget falls this low. |
@@ -145,4 +145,4 @@ The kept-posts gap is mostly the test harness: it builds brand tokens from the s
 | `MOBILE_SPACING_JITTER_S` | `1` | Random extra gap. |
 | `MOBILE_TIMEOUT_S` | `25` | Per-request timeout on the route; the calls answer in ~0.2 s. |
 | `HOST` | `0.0.0.0` | Bind address. |
-| `PORT` | `8001` | Bind port; `trustpilot-reviews` has 8000. |
+| `PORT` | `8001` | Bind port; `trustpilot-reviews` has 8000, `facebook-ad-library` 8003. |

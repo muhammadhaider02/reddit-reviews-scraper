@@ -1,9 +1,9 @@
-# Production topology: one container beside n8n on the same VPS, on n8n's Docker network.
+# Production topology: one container beside n8n on the same host, on n8n's Docker network.
 #
 # There is no reverse proxy and no public route here. n8n reaches the API by container name
 # over the shared network (http://reddit-reviews:8001), so nothing is published to the host and
-# nothing is reachable from the internet. The VPS already runs Traefik on 80/443 for n8n's own
-# UI - do not add a second proxy, it would fail to bind.
+# nothing is reachable from the internet. If the host already runs a reverse proxy on 80/443 for
+# n8n's own UI, do not add a second one here, it would fail to bind.
 #
 # Memory model. Scrapling launches a full Chromium per fetch and tears it down again
 # (StealthyFetcher.fetch -> `with StealthySession(...)`), so usage is spiky, not cumulative:
@@ -35,7 +35,7 @@ services:
     # trustpilot-reviews beside it on a 4GB box. Raise it if you raise MAX_CONCURRENCY.
     #
     # Do NOT lower MAX_CONCURRENCY to save memory. At 1 the peak drops to 350 MiB but the same
-    # 6-post search took 239s instead of 101s, against Stage 4's 290s node timeout. Concurrency
+    # 6-post search took 239s instead of 101s, against the caller's 290s node timeout. Concurrency
     # is a latency budget here, not just a memory knob.
     #
     # memswap_limit == mem_limit disables swap for the container: a browser thrashing swap is

@@ -1,13 +1,13 @@
-"""Replay Stage 4's Reddit chain against a running reddit-reviews server, locally.
+"""Replay the research workflow's Reddit chain against a running reddit-reviews server, locally.
 
   Apify: Reddit Search -> Sort Reddit Results -> IF: Has Strong Threads? -> Apify: Reddit Comments
   -> Fetch Reddit Comments -> Reddit Fallback Via Web Search (POST /reddit/mentions when the outcome
-  is not 'ok', the leg that replaced Tavily)
+  is not 'ok')
 
-The HTTP bodies are the ones Stage 4 sends; the two Code nodes run verbatim through run_node.mjs.
-n8n is read-only, so this is the end-to-end check before anyone edits the workflow.
+The HTTP bodies are the ones the workflow sends; its Code nodes run through run_node.mjs. This is the
+end-to-end check that the service and the workflow still fit together.
 
-  uv run python tests/n8n/stage4_reddit_chain.py --brand Gymshark --domain gymshark.com \
+  uv run python tests/n8n/research_reddit_chain.py --brand Gymshark --domain gymshark.com \
       --terms "Gymshark" "Gymshark gym clothes" "Gymshark reviews" [--url http://127.0.0.1:8001] [--token ...]
 """
 
@@ -55,7 +55,7 @@ def main() -> int:
     ap.add_argument("--force-fallback", action="store_true", help="run the fallback leg even when the primary outcome is ok")
     args = ap.parse_args()
 
-    workdir = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="stage4_"))
+    workdir = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="research_"))
     workdir.mkdir(parents=True, exist_ok=True)
     headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
     domain = args.domain.lower()

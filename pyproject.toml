@@ -1,10 +1,11 @@
 [project]
 name = "reddit-reviews"
 version = "0.1.0"
-description = "Self-hosted Reddit scraper: a drop-in HTTP replacement for the Apify actor used by the Stage 4 research workflow"
+description = "Self-hosted Reddit scraper: a drop-in HTTP replacement for the Apify reddit-scraper actor, with a Tavily-shaped mentions search"
 readme = "README.md"
+license = "MIT"
 authors = [
-    { name = "Haider", email = "haider@ecombench.com" }
+    { name = "Haider Akbar", email = "muhammadhaiderakbar@gmail.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [

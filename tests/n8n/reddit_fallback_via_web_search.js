@@ -1,57 +1,44 @@
 // ===================================================================
-// THE RESEARCH FALLBACK (built 31 Aug) - TIER 3'S ROUTE, AS A SAFETY NET
+// REDDIT FALLBACK VIA WEB SEARCH - a second route when Reddit search finds nothing
 // ===================================================================
-// WHAT THIS EXISTS FOR. When the Apify Reddit scraper comes back with nothing,
-// Parse Report marks the brand Failed, it is retried up to three times AGAINST
-// THE SAME EMPTY SOURCE, and then Abandoned forever. Retrying an empty source
-// returns the same emptiness, so the retries are pure cost and the brand is lost
-// even when it has plenty of customer discussion findable another way.
+// When the primary Reddit search comes back with nothing usable (reddit_outcome
+// is not 'ok'), this node tries a second route before the brand is marked as
+// having no Reddit data: it calls the service's POST /reddit/mentions, which
+// searches Reddit comments for the brand, and appends the results that name the
+// brand as extra posts.
 //
-// This node gives that brand a SECOND ROUTE before any of that happens: the same
-// Tavily web search, restricted to reddit.com, that the LinkedIn lane has used
-// successfully since August. It is the Tier 3 approach, applied to the lane that
-// never had it.
-//
-// *** WHY IT IS ONE NODE IN THE MAIN CHAIN AND NOT A NEW BRANCH ***
-// Cold V2 was broken on 19 Aug by adding a parallel path without removing the old
-// direct connection: leads ran both routes at once and copy was written with no
-// research behind it. The canvas looked right and validation flagged nothing.
-// This node sits INLINE between the Reddit step and Trustpilot. There is one path
-// in and one path out, so that failure is structurally impossible here.
-// It also follows the pattern already proven in this workflow by
-// `Resolve Ads Via Facebook Page`, which makes its own HTTP calls from inside a
-// Code node rather than adding vendor nodes and branches.
+// It sits inline in the main chain (one path in, one path out) and makes its own
+// HTTP call from inside the Code node, rather than adding a separate branch.
 //
 // *** IT ONLY FIRES WHEN THE PRIMARY SOURCE FOUND NOTHING ***
-// If Apify returned usable posts this node is a pass-through and costs zero. So
-// it never competes with the primary source and never doubles up spend on a brand
-// that was already fine. The only brands it costs anything on are the ones we
-// were previously throwing away.
+// If the primary search returned usable posts this node is a pass-through and
+// costs nothing, so it never competes with the primary source.
 //
 // *** WHAT IT MUST NEVER DO: INVENT METADATA ***
-// Apify returns subreddit, post age, comment count and vote score. Tavily returns
-// a page title and an extract, and NONE of that metadata. Filling those fields
-// with plausible values would put fabricated evidence into a bundle that is reused
-// for every touch for months. Every fallback post therefore carries its
-// provenance IN THE TEXT the model reads, and its metadata fields are left empty
-// rather than guessed.
+// The primary route returns subreddit, post age, comment count and vote score.
+// The search results carry a title and an extract, and NONE of that metadata.
+// Filling those fields with plausible values would put fabricated evidence into
+// the research output. Every fallback post therefore carries its provenance IN
+// THE TEXT the model reads, and its metadata fields are left empty rather than
+// guessed.
 //
 // *** THE BRAND-MENTION GATE STILL APPLIES ***
 // `Sort Reddit Results` hard-rejects any post that never names the brand, because
-// a Super Mario thread once scored 4 on Colorful Standard purely on engagement.
+// an unrelated thread can score well purely on engagement.
 // A web search has no such filter of its own and drifts more, not less, so the
 // same gate is applied here to the extracts. A result that does not name the
 // brand is dropped, exactly as it would be on the primary route.
 const b = $input.first().json;
 
-// ---- REQUEST COUNTERS (12 Sep 2026, telemetry only) ------------------------
-// Tavily is called ONLY from inside this node, so run telemetry - which counts
-// the named HTTP nodes - never recorded a single Tavily request.
+// ---- REQUEST COUNTERS ------------------------------------------------------
+// This node makes its own HTTP call, so it counts its own requests and errors.
+// The tavily_calls / tavily_errors key names are kept because downstream nodes
+// read them by name; they count calls to POST /reddit/mentions.
 let tavilyCalls = 0;
 let tavilyErrors = 0;
 
-// Only rescue a brand the primary source genuinely failed on. 'ok' means Apify
-// found usable discussion and there is nothing to rescue.
+// Only rescue a brand the primary source genuinely failed on. 'ok' means the
+// primary search found usable discussion and there is nothing to rescue.
 const primaryOk = b.reddit_outcome === 'ok';
 if (primaryOk) {
   return [{ json: { ...b, reddit_fallback_used: false, reddit_fallback_reason: 'primary reddit source returned usable data', tavily_calls: 0, tavily_errors: 0 } }];
@@ -86,12 +73,11 @@ try {
   tavilyCalls++;
   res = await this.helpers.httpRequest({
     method: 'POST',
-    // In-house comment search (reddit-reviews, POST /reddit/mentions), 23 Sep 2026. Same shape
-    // Tavily answered with: { results: [{ title, url, content, raw_content }] }. Unauthenticated
-    // by design: a Code node cannot read n8n credentials, the container has no published ports,
-    // and MENTIONS_REQUIRE_TOKEN on the service is the switch if that ever changes. The
-    // `tavily_calls` / `tavily_errors` keys below keep their names because Build Run Telemetry
-    // sums them by name; they now count calls to this service.
+    // The service's comment search (reddit-reviews, POST /reddit/mentions). It answers in the
+    // Tavily search response shape: { results: [{ title, url, content, raw_content }] }.
+    // Unauthenticated by design: a Code node cannot read n8n credentials, so the service is
+    // reached on a private network, and MENTIONS_REQUIRE_TOKEN on the service is the switch if
+    // that ever changes.
     url: 'http://reddit-reviews:8001/reddit/mentions',
     timeout: 45000,
     json: true,
@@ -100,8 +86,9 @@ try {
       searchTerms: Array.isArray(b.reddit_search_terms) ? b.reddit_search_terms : [],
       query: query,
       maxResults: 15,
-      // Corroboration for a multi-word brand name: without these, "Safe Hero" rescues Overwatch
-      // comments about "a very safe hero" and the gate cannot tell (the phrase IS in the text).
+      // Corroboration for a multi-word brand name: without these, a brand named with ordinary
+      // words rescues comments that use those words in passing, and the gate cannot tell (the
+      // phrase IS in the text).
       productKeywords: Array.isArray(b.product_keywords) ? b.product_keywords : [],
       primaryProduct: String(b.primary_product || ''),
       domain: String(b.domain_clean || '')
@@ -137,7 +124,7 @@ for (const r of results) {
     strong: false,
     title: (PROVENANCE + title).slice(0, 400),
     text: body.slice(0, 900),
-    // Left empty on purpose. These are the fields Tavily does not return, and a
+    // Left empty on purpose. These are the fields the search does not return, and a
     // plausible-looking value here would be fabricated evidence.
     score_upvotes: 0,
     num_comments: 0,

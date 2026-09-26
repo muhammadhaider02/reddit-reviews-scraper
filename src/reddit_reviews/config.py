@@ -25,17 +25,17 @@ class Settings:
     # Shared secret n8n sends as `Authorization: Bearer <token>`. Empty = no auth (local testing only).
     api_token: str = os.environ.get("API_TOKEN", "").strip()
     # Residential proxy. Not optional on a datacenter host: Reddit's "blocked by network security"
-    # wall is IP-based, and measured 2026-09-17, this VPS gets a 403 block page for every request
+    # wall is IP-based, and measured 2026-09-17, a datacenter server gets a 403 block page for every request
     # while a residential IP gets 200 for the same URL, same second - curl, Chromium and Firefox
     # alike, so it is the address and not the browser. The Apify actor this replaces paid for
     # RESIDENTIAL proxies for the same reason.
     # Two forms, parsed by scraper.proxy_config(): a plain URL (http://user:pass@host:port), or
     # Decodo's `host:port:user:pass`. Use a STICKY port (10001+), never the rotating gateway (7000).
     proxy: str | None = os.environ.get("SCRAPER_PROXY", "").strip() or None
-    # Browser fetches allowed at once, across ALL requests. Stage 4 sends 3 search terms, then up to 8 threads.
+    # Browser fetches allowed at once, across ALL requests. The research workflow sends 3 search terms, then up to 8 threads.
     max_concurrency: int = _env_int("MAX_CONCURRENCY", 3)
-    # Per-page browser timeout. Stage 4 allows 290s for the search call and 250s for the comments call
-    # (read from the live workflow's node timeouts, u3698BQra0i9oK4b).
+    # Per-page browser timeout. The research workflow allows 290s for the search call and 250s for the
+    # comments call (its HTTP node timeouts).
     fetch_timeout_ms: int = _env_int("FETCH_TIMEOUT_MS", 45_000)
     # We only read the server-rendered HTML, so images, fonts, CSS and media are pure memory and
     # bandwidth cost in the browser. Blocking them is the single biggest memory lever we have.
@@ -44,7 +44,7 @@ class Settings:
     # Reddit search returns about 7 posts per page. Hard cap on pages followed per search term.
     max_search_pages: int = _env_int("MAX_SEARCH_PAGES", 3)
     # Search results carry only a snippet. When on, each found post's thread page is read for its full body,
-    # as the Apify actor returned. Costs one page per post (~30 for Stage 4) but keeps scoring and quotes intact.
+    # as the Apify actor returned. Costs one page per post (~30 for a typical call) but keeps scoring and quotes intact.
     full_bodies: bool = _env_bool("FULL_BODIES", True)
     # Hard cap on thread pages read for bodies per search call.
     max_body_fetches: int = _env_int("MAX_BODY_FETCHES", 30)
@@ -53,7 +53,7 @@ class Settings:
     # thread that cannot be cancelled - so a caller that gives up does NOT free the browser. This is
     # what frees it: no new page, body or thread is started that cannot finish inside the budget,
     # and the call returns what it already has with `truncated` set. One brand alone takes ~95s, but
-    # overlapping runs share the browser gate and slow down. Must stay under BOTH Stage 4 node
+    # overlapping runs share the browser gate and slow down. Must stay under BOTH of the caller's node
     # timeouts (search 290s, comments 250s), and under docker-compose.yml's stop_grace_period.
     scrape_budget_s: int = _env_int("SCRAPE_BUDGET_S", 200)
     # Hard cap on thread URLs read per call, whatever the caller sends.
@@ -71,14 +71,14 @@ class Settings:
     # Re-mint when a token's 100-per-10-minutes budget falls this low. A fresh token gets a fresh budget.
     mobile_min_budget: float = float(os.environ.get("MOBILE_MIN_BUDGET", "10"))
     # Minimum gap between two calls on one device, plus up to this much jitter. Reddit's ceiling is
-    # 100 per 10 min per token; 8 thread reads at ~2.5s apart is ~20s, well inside Stage 4's 250s.
+    # 100 per 10 min per token; 8 thread reads at ~2.5s apart is ~20s, well inside the caller's 250s.
     mobile_spacing_s: float = float(os.environ.get("MOBILE_SPACING_S", "2"))
     mobile_spacing_jitter_s: float = float(os.environ.get("MOBILE_SPACING_JITTER_S", "1"))
     # Per-request timeout. These calls answer in ~0.2s; this is only for a hung socket.
     mobile_timeout_s: int = _env_int("MOBILE_TIMEOUT_S", 25)
     # ----------------------------------------------------------------- the comment-search fallback
-    # POST /reddit/mentions replaces the Tavily call in workflow 02's `Reddit Fallback Via Web
-    # Search`. That Code node gives the call 45 s, so this route has its own, shorter clocks:
+    # POST /reddit/mentions replaces a Tavily call in the research workflow's `Reddit Fallback Via Web
+    # Search` node. That Code node gives the call 45 s, so this route has its own, shorter clocks:
     #   one fetch                                 MENTIONS_FETCH_TIMEOUT_MS = 10 s (measured 2-5 s)
     #   page 1 worst case = 2 x 10 + RETRY_DELAY  22 s, never skipped
     #   page 2 reservation = 1 x 10 + 5 s body    page 2 only if page 1 was done by ~15 s

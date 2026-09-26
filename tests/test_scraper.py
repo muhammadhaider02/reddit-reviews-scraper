@@ -34,9 +34,9 @@ def test_iso_normalises_reddit_timestamps_for_javascript():
 
 
 def test_search_url_is_literal_and_sanitised():
-    url = build_search_url("Hairbrella reviews", sort="NOPE", time_filter="year")
+    url = build_search_url("Rainveil reviews", sort="NOPE", time_filter="year")
     assert url.startswith("https://www.reddit.com/svc/shreddit/search/?")
-    assert "q=Hairbrella+reviews" in url and "type=posts" in url
+    assert "q=Rainveil+reviews" in url and "type=posts" in url
     assert "sort=relevance" in url and "t=year" in url
     assert "disableSpellCorrection=true" in url
 
@@ -68,7 +68,7 @@ GATEWAY_PAGE = "<html><head><title>Gateway</title></head><body><h1>Gateway</h1><
 
 
 def test_reddit_documents_are_told_from_interstitials():
-    for name in ("search_gymshark_reviews.html", "search_gymshark_reviews_page2.html", "search_hairbrella.html",
+    for name in ("search_gymshark_reviews.html", "search_gymshark_reviews_page2.html", "search_rainveil.html",
                  "thread_text_post.html", "thread_image_post.html"):
         assert is_reddit_document(fixture(name)), name
     assert not is_reddit_document(GATEWAY_PAGE)
@@ -163,7 +163,7 @@ def search_site(extra: dict | None = None) -> FakeReddit:
     pages = {
         build_search_url("Gymshark reviews"): (200, page1),
         next_url: (200, fixture("search_gymshark_reviews_page2.html")),
-        build_search_url("Hairbrella"): (200, fixture("search_hairbrella.html")),
+        build_search_url("Rainveil"): (200, fixture("search_rainveil.html")),
         # every body fetch lands on the text thread; good enough to prove bodies are replaced
         "https://www.reddit.com/r/*": (200, fixture("thread_text_post.html")),
     }
@@ -207,8 +207,8 @@ def test_a_later_term_pages_past_what_an_earlier_term_returned():
 
 def test_backfill_is_a_no_op_without_overlap():
     site = search_site()
-    res = scrape_search(["Hairbrella", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
-    assert res.term_counts == {"Hairbrella": (7, 7), "Gymshark reviews": (7, 7)}
+    res = scrape_search(["Rainveil", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    assert res.term_counts == {"Rainveil": (7, 7), "Gymshark reviews": (7, 7)}
     assert res.pages_fetched == 2 and len(site.calls) == 2
 
 
@@ -227,15 +227,15 @@ def test_backfill_stops_at_max_search_pages():
 
 def test_search_dedupes_across_terms_and_keeps_term_order():
     site = search_site()
-    res = scrape_search(["Hairbrella", "Gymshark reviews", "Hairbrella"], max_posts=7, fetcher=site, full_bodies=False)
+    res = scrape_search(["Rainveil", "Gymshark reviews", "Rainveil"], max_posts=7, fetcher=site, full_bodies=False)
     assert len(res.posts) == 14
-    assert [p.search_term for p in res.posts[:7]] == ["Hairbrella"] * 7
+    assert [p.search_term for p in res.posts[:7]] == ["Rainveil"] * 7
     assert len({p.id for p in res.posts}) == 14
 
 
 def test_search_fills_full_bodies_from_thread_pages():
     site = search_site()
-    res = scrape_search(["Hairbrella"], max_posts=7, fetcher=site, full_bodies=True)
+    res = scrape_search(["Rainveil"], max_posts=7, fetcher=site, full_bodies=True)
     assert all(not p.body_is_snippet for p in res.posts)
     assert all(p.body.startswith("Onyx V5 Hoodie") for p in res.posts)
     assert res.pages_fetched == 1 + 7
@@ -280,10 +280,10 @@ def test_body_fetch_failure_keeps_snippet():
 
 
 def test_search_partial_failure_returns_what_worked():
-    site = search_site({build_search_url("Hairbrella"): (403, fixture("blocked.html"))})
-    res = scrape_search(["Hairbrella", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    site = search_site({build_search_url("Rainveil"): (403, fixture("blocked.html"))})
+    res = scrape_search(["Rainveil", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
     assert len(res.posts) == 7
-    assert list(res.failed_terms) == ["Hairbrella"]
+    assert list(res.failed_terms) == ["Rainveil"]
 
 
 def test_search_all_blocked_raises_vendor_error():
@@ -292,7 +292,7 @@ def test_search_all_blocked_raises_vendor_error():
         scrape_search(["Gymshark", "Gymshark reviews"], fetcher=site)
     # page 1 of a term gets ATTEMPTS + 1 rolls at the exit, so three fetches per term
     assert len(site.calls) == 6
-    # must not look like a brand-side error to Stage 4's BRAND_ERROR_RE
+    # must not look like a brand-side error to the research workflow's BRAND_ERROR_RE
     import re
 
     assert not re.search(r"\b404\b|not found|no such (company|business|page)|invalid (url|domain)", str(e.value), re.I)
@@ -319,17 +319,17 @@ def test_browser_crash_is_retried_then_raised():
 def test_first_search_page_survives_two_refused_exits():
     """Measured 19 Sep 2026: 3 of 21 first attempts were refused and every retry on a fresh exit
     succeeded. Two refusals in a row used to lose the whole term while the call returned 200."""
-    answers = [(403, fixture("blocked.html")), (403, fixture("blocked.html")), (200, fixture("search_hairbrella.html"))]
+    answers = [(403, fixture("blocked.html")), (403, fixture("blocked.html")), (200, fixture("search_rainveil.html"))]
     calls = []
 
     def flaky(url, wait_selector=None):
         calls.append(url)
         return answers.pop(0)
 
-    res = scrape_search(["Hairbrella"], max_posts=7, fetcher=flaky, full_bodies=False)
+    res = scrape_search(["Rainveil"], max_posts=7, fetcher=flaky, full_bodies=False)
     assert len(calls) == 3
     assert len(res.posts) == 7 and res.failed_terms == {}
-    assert res.term_counts == {"Hairbrella": (7, 7)}
+    assert res.term_counts == {"Rainveil": (7, 7)}
 
 
 def test_a_refused_later_page_keeps_what_page_one_found():
@@ -358,17 +358,17 @@ def test_search_reports_raw_and_unique_per_term():
     """`raw` is every post the term's pages produced; `unique` is what it contributed once the
     earlier terms' posts were set aside. Here the second term's only page is the first term's
     answer and its cursor leads to a 404, so it contributes nothing and says so."""
-    site = search_site({build_search_url("Hairbrella hats"): (200, fixture("search_hairbrella.html"))})
-    res = scrape_search(["Hairbrella", "Hairbrella hats"], max_posts=7, fetcher=site, full_bodies=False)
-    assert res.term_counts == {"Hairbrella": (7, 7), "Hairbrella hats": (7, 0)}
+    site = search_site({build_search_url("Rainveil hats"): (200, fixture("search_rainveil.html"))})
+    res = scrape_search(["Rainveil", "Rainveil hats"], max_posts=7, fetcher=site, full_bodies=False)
+    assert res.term_counts == {"Rainveil": (7, 7), "Rainveil hats": (7, 0)}
     assert len(res.posts) == 7
     assert res.empty_bodies == sum(1 for p in res.posts if not p.body)
 
 
 def test_a_failed_term_shows_as_zero_in_the_term_counts():
-    site = search_site({build_search_url("Hairbrella"): (403, fixture("blocked.html"))})
-    res = scrape_search(["Hairbrella", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
-    assert res.term_counts == {"Hairbrella": (0, 0), "Gymshark reviews": (7, 7)}
+    site = search_site({build_search_url("Rainveil"): (403, fixture("blocked.html"))})
+    res = scrape_search(["Rainveil", "Gymshark reviews"], max_posts=7, fetcher=site, full_bodies=False)
+    assert res.term_counts == {"Rainveil": (0, 0), "Gymshark reviews": (7, 7)}
 
 
 def test_crosspost_body_comes_from_the_original_post():
@@ -384,7 +384,7 @@ def test_mobile_body_fill_uses_the_crosspost_original(mobile_on, monkeypatch):
         "info",
         lambda ids: {i: {"name": i, "selftext": "", "crosspost_parent_list": [{"selftext": "from the original"}]} for i in ids},
     )
-    res = scrape_search(["Hairbrella"], max_posts=7, fetcher=site, full_bodies=True)
+    res = scrape_search(["Rainveil"], max_posts=7, fetcher=site, full_bodies=True)
     assert res.mobile_posts == 7
     assert all(p.body == "from the original" and not p.body_is_snippet for p in res.posts)
     assert res.empty_bodies == 0
@@ -449,8 +449,8 @@ def test_search_budget_never_skips_the_first_page(budget):
     budget(0)  # no budget at all
     site = search_site()
 
-    # Returning zero posts would read to Stage 4 as "Reddit has nothing for this brand" and fire
-    # the Tavily fallback. Page 1 is always attempted, however late we are.
+    # Returning zero posts would read to the research workflow as "Reddit has nothing for this brand"
+    # and fire its web-search fallback. Page 1 is always attempted, however late we are.
     res = scrape_search(["Gymshark reviews"], max_posts=10, fetcher=site, full_bodies=False)
     assert len(site.calls) == 1
     assert len(res.posts) == 7

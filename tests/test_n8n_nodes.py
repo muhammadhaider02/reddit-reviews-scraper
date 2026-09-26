@@ -1,7 +1,7 @@
-"""Run Stage 4's own Code nodes (verbatim copies in tests/n8n/) on this service's output.
+"""Run the research workflow's own Code nodes (copies in tests/n8n/) on this service's output.
 
-n8n is read-only for us, so this is how a change here is proven against the workflow before anyone
-touches the HTTP nodes. Needs `node` on PATH; skipped otherwise.
+This proves a change here stays compatible with the n8n workflow that consumes it, without touching
+the workflow itself. Needs `node` on PATH; skipped otherwise.
 """
 
 import json
@@ -46,7 +46,7 @@ def test_sort_node_reads_search_items(tmp_path):
     assert out["reddit_request_failed"] is False
     assert out["reddit_raw_post_count"] == 14
     assert out["reddit_post_count"] > 0 and out["reddit_strong_post_count"] > 0
-    # replica communities and listings are still caught by Stage 4's own filters
+    # replica communities and listings are still caught by the workflow's own filters
     assert out["reddit_reject_reasons"]["bad_community"] >= 1
     kept = out["reddit_posts"][0]
     assert kept["url"].startswith("https://www.reddit.com/r/") and kept["subreddit"] and kept["age_days"] is not None
@@ -94,17 +94,17 @@ def mentions_response() -> dict:
     from reddit_reviews.mentions import phrase_query, search_mentions
     from reddit_reviews.scraper import build_comment_search_url
 
-    site = FakeReddit({build_comment_search_url(phrase_query("Howdysnax", "Howdysnax")): (200, fixture("search_comments_howdysnax.html"))})
-    res = search_mentions(["Howdysnax"], fetcher=site)
-    return {"query": "Howdysnax", "results": [mention_item(t) for t in res.threads], "response_time": res.seconds}
+    site = FakeReddit({build_comment_search_url(phrase_query("Zestbite", "Zestbite")): (200, fixture("search_comments_zestbite.html"))})
+    res = search_mentions(["Zestbite"], fetcher=site)
+    return {"query": "Zestbite", "results": [mention_item(t) for t in res.threads], "response_time": res.seconds}
 
 
 FALLBACK_ITEM = {
-    "Brand Name": "Howdysnax",
-    "domain_clean": "howdysnax.com",
-    "brand_match_tokens": ["howdysnax", "howdysnax.com"],
-    "reddit_search_terms": ["Howdysnax", "Howdysnax protein snacks", "Howdysnax reviews"],
-    "reddit_query": "Howdysnax | Howdysnax protein snacks | Howdysnax reviews",
+    "Brand Name": "Zestbite",
+    "domain_clean": "zestbite.com",
+    "brand_match_tokens": ["zestbite", "zestbite.com"],
+    "reddit_search_terms": ["Zestbite", "Zestbite protein snacks", "Zestbite reviews"],
+    "reddit_query": "Zestbite | Zestbite protein snacks | Zestbite reviews",
     "reddit_outcome": "all_irrelevant",
     "reddit_posts": [],
 }
@@ -124,7 +124,7 @@ def test_fallback_node_rescues_comment_mentions(tmp_path):
     for p in out["reddit_posts"]:
         assert p["subreddit"] == "web-search-extract" and p["age_days"] is None and p["score_upvotes"] == 0
         assert p["title"].startswith(PROVENANCE) and len(p["text"]) <= 900 and p["url"].startswith("https://www.reddit.com/r/")
-    assert any("howdysnax.com" in p["text"] for p in out["reddit_posts"])
+    assert any("zestbite.com" in p["text"] for p in out["reddit_posts"])
 
 
 def test_fallback_node_gate_drops_results_that_do_not_name_the_brand(tmp_path):
@@ -135,7 +135,7 @@ def test_fallback_node_gate_drops_results_that_do_not_name_the_brand(tmp_path):
 
 
 def test_fallback_node_empty_results_is_not_an_error(tmp_path):
-    out = run(tmp_path, "fallback", FALLBACK_ITEM, {"query": "Howdysnax", "results": [], "response_time": 3.0})
+    out = run(tmp_path, "fallback", FALLBACK_ITEM, {"query": "Zestbite", "results": [], "response_time": 3.0})
     assert out["reddit_fallback_used"] is True and out["reddit_fallback_count"] == 0
     assert out["tavily_calls"] == 1 and out["tavily_errors"] == 0 and out["reddit_outcome"] == "all_irrelevant"
 

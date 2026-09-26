@@ -18,7 +18,7 @@ jobs:
           node-version: 22
       - run: uv python install 3.11
       - run: uv sync --frozen
-      # includes tests/test_stage4_nodes.py, which runs Stage 4's own Code nodes with node
+      # includes the tests that run the calling workflow's own Code nodes with node
       - run: uv run pytest -q
 
   docker-image:

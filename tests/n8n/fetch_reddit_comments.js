@@ -1,6 +1,6 @@
-// STEP 2 OF 2 (processing only). The Apify call happens in a real HTTP node
-// upstream, because NEITHER httpRequest nor httpRequestWithAuthentication can
-// carry a stored credential from inside a Code node.
+// Fetch Reddit Comments. Step 2 of 2 (processing only): filter the comments an
+// upstream HTTP node fetched for the strong threads, and set reddit_outcome. The
+// fetch itself is an HTTP node because a Code node cannot use a stored credential.
 const b = $('Sort Reddit Results').first().json;
 const items = $input.all().map(i => i.json);
 const targets = b.reddit_comment_targets || [];
@@ -20,9 +20,8 @@ const brandHits = (txt) => {
   return n;
 };
 
-// THE JUNK FILTER STAYS, and matters MORE now that we keep more.
-// [stated] The user wants maximum raw material, not maximum noise. A deleted
-// comment or a five-word "same here" adds nothing and crowds out real language.
+// The junk filter. A deleted comment or a five-word "same here" adds nothing and
+// crowds out real customer language.
 const isJunk = (txt) => {
   const t = String(txt || '').trim();
   if (!t) return true;
@@ -31,8 +30,8 @@ const isJunk = (txt) => {
   return false;
 };
 
-// Comment records use a different date field from posts, which is why the age
-// filter silently did nothing on an earlier run. Try every plausible name.
+// Comment records use a different date field from posts, so try every
+// plausible name.
 const ageDays = (r) => {
   const raw = r.commentCreatedAt || r.createdAt || r.created_at || r.createdAtISO || r.timestamp;
   const d = Date.parse(raw);
@@ -71,8 +70,8 @@ if (!commentFetchFailed) {
 
 // Comments naming the brand outrank ones relevant only by context.
 comments.sort((x, y) => (Number(y.names_brand) - Number(x.names_brand)) || (y.score_upvotes - x.score_upvotes));
-// Raised from 100. Source now returns up to 20 per post across 8 threads = 160,
-// so a 100 cap would have thrown away the extra the moment it arrived.
+// The source returns up to 20 comments per post across 8 threads (160), so the
+// cap sits above that.
 const keptComments = comments.slice(0, 200);
 
 const posts = b.reddit_posts || [];
